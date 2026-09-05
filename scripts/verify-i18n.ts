@@ -67,7 +67,9 @@ for (const [key, entry] of Object.entries(i18nDict)) {
 }
 
 // ── 3：死 key（src/ 与 scripts/ 全量字面扫描 + 拼接前缀放行）──────────
-const files = execSync('git ls-files src scripts', { encoding: 'utf8' })
+// Include new, non-ignored sources so local pre-staging validation checks the
+// same corpus that CI will see after the explicitly selected files are added.
+const files = execSync('git ls-files --cached --others --exclude-standard src scripts', { encoding: 'utf8' })
   .trim().split('\n')
   .filter(f => /\.(ts|tsx|mjs|cjs|js)$/.test(f))
   .filter(f => f !== 'src/i18n.ts' && f !== 'scripts/verify-i18n.ts')
