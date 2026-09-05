@@ -441,25 +441,14 @@ export class TuiPluginHostRuntime extends Service implements TuiPluginHost {
           request.scope,
         ),
       }))
-    // Admission and public publication use the same descriptor used by the
-    // active runtime path. In new/non-legacy modes that is the live-only
-    // Kernel descriptor; in the default legacy mode it is the explicit
-    // legacy-compatibility mounted-service descriptor, so existing plugins
-    // required against Command/LocalStorage/MessageObserver are not rejected
-    // simply because the default mode does not start the new Kernel.
-    const state = hostStateFor(this)
-    // Only use the Kernel descriptor after the Kernel has actually started
-    // and completed its initial live refresh. Before that point the Kernel's
-    // descriptor is intentionally empty (lifecycle probes have not run yet);
-    // using it would falsely reject plugins that require Command/
-    // LocalStorage/MessageObserver. Fall back to the legacy mounted-service
-    // descriptor until the first refresh has completed.
-    const kernelReady = state.kernelRuntime !== undefined
-      && state.kernelStarted
-      && state.kernelRuntime.isRefreshCompleted()
-    const admissionHost = kernelReady
-      ? state.kernelRuntime!.descriptorBuild().descriptor
-      : this.build().descriptor
+    // Admission must rebuild through the same synchronous topology path as
+    // public descriptor publication. In particular, `build()` runs Kernel
+    // detection before reading its descriptor, so a DecisionEvents dispatch
+    // marker mounted between an async refresh and this activation is visible.
+    // New-mode remains fail-closed: without completed live evidence,
+    // `build()` returns the empty non-legacy descriptor rather than a legacy
+    // compatibility claim.
+    const admissionHost = this.build().descriptor
     const decision = negotiate(index, manifest, admissionHost, grants)
     if (decision.decision !== 'compatible' && decision.decision !== 'compatible_degraded') {
       const missing = 'missingRequired' in decision && decision.missingRequired !== undefined
