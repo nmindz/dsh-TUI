@@ -63,7 +63,7 @@ function makeAgent(id: string, sessionId: string): FakeAgent {
     whenIdle: () => Promise.resolve(),
   } as FakeAgent
 }
-const makeHandle = (agent: FakeAgent) => ({ agent, dispose: () => Promise.resolve() })
+const makeHandle = (agent: FakeAgent, onDispose?: () => void) => ({ agent, dispose: () => { onDispose?.(); return Promise.resolve() } })
 
 const subagentRows = (channel: { rows: Array<{ kind: string }> }) => channel.rows.filter(row => row.kind === 'subagent')
 
@@ -202,7 +202,52 @@ const subagentRows = (channel: { rows: Array<{ kind: string }> }) => channel.row
   check('5d. 新会话未被踩踏（agentId 不变）', (channel as unknown as { agentId: string }).agentId === 'agent-e3')
 }
 
-// ── 场景 6：recap 预算从新到旧收容（N1 单元断言） ────────────────────────
+// ── 场景 6：真实 createChannel 的 deferred attachment/owner teardown ──
+{
+  const ctx = new Context()
+  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
+  const initial = makeAgent('agent-f', 'sess-f')
+  const created = makeAgent('agent-f2', 'sess-f2')
+  let disposed = 0
+  let unblockAttachment!: () => void
+  provide('agents', { create: () => Promise.resolve(makeHandle(created, () => { disposed += 1 })) })
+  provide('workspaceRegistry', {
+    resolveByPath: async () => ({ attachSession: () => new Promise<void>(resolve => { unblockAttachment = resolve }) }),
+  })
+  const channel = createChannel(ctx as never, initial as never, {
+    model: 'm0', cwd: '/tmp/demo', provider: 'p0', activity: false,
+  })
+  const pending = channel.newSession()
+  await sleep(30)
+  channel.releaseContributions()
+  await sleep(0)
+  check('6a. /new attachment 阻塞时 owner teardown 立即回收 prepared handle', disposed === 1, String(disposed))
+  unblockAttachment()
+  check('6b. teardown 后 /new 不会完成为成功切换', (await pending) === false)
+}
+
+// ── 场景 7：真实 createChannel 的 post-commit setup throw fail-closes ───
+{
+  const ctx = new Context()
+  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
+  const initial = makeAgent('agent-g', 'sess-g')
+  const created = makeAgent('agent-g2', 'sess-g2')
+  // The agent-side setup begins before channel event listeners; make that
+  // registration fail and assert the enclosing synchronous adoption revokes.
+  created.ctx = { on: () => { throw new Error('new-agent subscription boom') } }
+  let disposed = 0
+  provide('agents', { create: () => Promise.resolve(makeHandle(created, () => { disposed += 1 })) })
+  const channel = createChannel(ctx as never, initial as never, {
+    model: 'm0', cwd: '/tmp/demo', provider: 'p0', activity: false,
+  })
+  let rejected = false
+  try { await channel.newSession() } catch (error) { rejected = error instanceof Error && /subscription boom/u.test(error.message) }
+  await sleep(0)
+  check('7a. /new post-commit subscription throw propagates', rejected)
+  check('7b. /new post-commit subscription throw tears down new live handle', disposed === 1, String(disposed))
+}
+
+// ── 场景 8：recap 预算从新到旧收容（N1 单元断言） ────────────────────────
 {
   const message = (role: 'user' | 'assistant', text: string) => ({
     type: role === 'user' ? 'user/message' : 'assistant/message',
@@ -214,16 +259,16 @@ const subagentRows = (channel: { rows: Array<{ kind: string }> }) => channel.row
   })
   const events = [1, 2, 3, 4, 5, 6].map(n => message(n % 2 === 0 ? 'assistant' : 'user', `msg${n}-`.repeat(1500)))
   const payload = collectRecentActivity(events as never, 6000)
-  check('6a. 最新交互进入 payload', payload.includes('msg6-'), `len=${payload.length}`)
-  check('6b. 吞预算的旧消息不再独占 payload', !payload.includes('msg1-'), payload.slice(0, 40))
+  check('8a. 最新交互进入 payload', payload.includes('msg6-'), `len=${payload.length}`)
+  check('8b. 吞预算的旧消息不再独占 payload', !payload.includes('msg1-'), payload.slice(0, 40))
   const mixed = [
     message('user', 'old-short'),
     message('assistant', 'x'.repeat(5800)),
     message('user', 'newest-question'),
   ]
   const mixedPayload = collectRecentActivity(mixed as never, 6000)
-  check('6c. 混合预算下最新短消息完整保留', mixedPayload.includes('newest-question'))
-  check('6d. 输出保持时间顺序（旧→新）', mixedPayload.indexOf('x'.repeat(20)) < mixedPayload.indexOf('newest-question'))
+  check('8c. 混合预算下最新短消息完整保留', mixedPayload.includes('newest-question'))
+  check('8d. 输出保持时间顺序（旧→新）', mixedPayload.indexOf('x'.repeat(20)) < mixedPayload.indexOf('newest-question'))
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} 项失败`)
