@@ -258,6 +258,12 @@ agentsById.set(liveAgent.id, liveAgent)
 const channel = createChannel(ctx as never, liveAgent as never, {
   model: 'model-00', cwd: '/tmp/demo', provider: 'fake-provider', activity: false,
 })
+// No settings row means there is nothing to opt into: auto recap stays off.
+// This fixture intentionally provides a partial llm catalog without stream;
+// direct recap must degrade rather than binding a missing method.
+check('absent settings defaults auto recap off', channel.autoRecapOnOpen === false)
+const unavailableRecap = await channel.recapRecent()
+check('partial llm recap degrades without throwing', unavailableRecap.summary === null && unavailableRecap.error?.includes('不可用') === true)
 
 const admitted = await mountAdmitted(ctx, 'event-export-name', testManifest({
   id: 'event-probe',
