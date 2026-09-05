@@ -2,6 +2,7 @@ import { createSessionTreeReader } from './channel/session-tree.js'
 import { createInputDelivery } from './channel/input-delivery.js'
 import { createChannelBinding } from './channel/binding.js'
 import { createChannelProjection } from './channel/projection.js'
+import { markChannelReadDirty } from '../adapter/channel/read-view.js'
 import { createChannelNotifications } from './channel/notifications.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { assembleContextFor, installModelSelection, type Agent, type AgentHandle, type CreateAgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -409,6 +410,8 @@ export function createChannel(
         outputLines: job.outputLines,
       }
       row.text = job.label
+      markChannelReadDirty(row)
+      markChannelReadDirty(state.rows)
     }
   }
   const jobStore = new BackgroundJobStore({
@@ -540,6 +543,8 @@ export function createChannel(
       }
       row.subagent = subagentRow
       row.text = sub.description
+      markChannelReadDirty(row)
+      markChannelReadDirty(state.rows)
     }
   }
   // The DSH slash-command registry (optional service): /plan, /goal and
@@ -601,11 +606,12 @@ export function createChannel(
   /** Deferred projection for the frame-aligned flush: runs INSIDE the
    *  emitStream timer, before listeners wake, so React always reads fully
    *  projected rows. No-op unless a chunk marked the projection dirty. */
-  const flushSubagentStream = (): void => {
-    if (!subagentStreamDirty) return
+  const flushSubagentStream = (): boolean => {
+    if (!subagentStreamDirty) return false
     subagentStreamDirty = false
     state.subagents = subagentStore.snapshot()
     syncSubagentRows(state.subagents)
+    return true
   }
   /** Immediate projection; supersedes any pending deferred flush (the fresh
    *  snapshot already contains everything the deferred pass would project). */
@@ -750,6 +756,7 @@ export function createChannel(
 
     rowIds.value = 0
     state.rows.length = 0
+    markChannelReadDirty(state.rows)
     resetSubagentProjection()
     resetJobProjection()
     // Goal/todo/title are session-scoped; the replay re-derives them for
@@ -1477,6 +1484,7 @@ export function createChannel(
 
     rowIds.value = 0
     state.rows.length = 0
+    markChannelReadDirty(state.rows)
     state.todos = []
     state.pending = []
     state.goal = undefined
@@ -1635,6 +1643,7 @@ export function createChannel(
 
     rowIds.value = 0
     state.rows.length = 0
+    markChannelReadDirty(state.rows)
     state.todos = []
     state.pending = []
     state.goal = undefined
@@ -2528,6 +2537,7 @@ export function createChannel(
 
       rowIds.value = 0
       state.rows.length = 0
+      markChannelReadDirty(state.rows)
       resetSubagentProjection()
       resetJobProjection()
       // Goal/todo/title are session-scoped; the replay re-derives them for
@@ -2720,6 +2730,7 @@ export function createChannel(
 
       rowIds.value = 0
       state.rows.length = 0
+      markChannelReadDirty(state.rows)
       resetSubagentProjection()
       resetJobProjection()
       // Goal/todo/title are session-scoped; the replay re-derives them for
@@ -2916,6 +2927,7 @@ export function createChannel(
 
       rowIds.value = 0
       state.rows.length = 0
+      markChannelReadDirty(state.rows)
       resetSubagentProjection()
       resetJobProjection()
       // Goal/todo/title are session-scoped; the replay re-derives them for
@@ -2996,6 +3008,7 @@ export function createChannel(
     cycleMode,
     clear() {
       state.rows.length = 0
+      markChannelReadDirty(state.rows)
       rowIds.value = 0
       projector.reset()
 
@@ -3610,6 +3623,7 @@ export function createChannel(
 
       rowIds.value = 0
       state.rows.length = 0
+      markChannelReadDirty(state.rows)
       state.todos = []
       state.pending = []
       state.goal = undefined
