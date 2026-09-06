@@ -385,6 +385,12 @@ export function Chat({
     subscribeStatus,
     () => statusContributions.getSegmentSnapshot(),
   )
+  // Plugin icons for built-in footer fields; the host still renders each
+  // field, so hover details and truncation stay host-owned.
+  const statusDecorations = React.useSyncExternalStore(
+    subscribeStatus,
+    () => statusContributions.getDecorationSnapshot(),
+  )
   // Shortcut handler failures surface as toasts (the registry also logs
   // them); the hook is re-pointed on every mount so a stale closure never
   // outlives its channel.
@@ -3986,6 +3992,7 @@ export function Chat({
         <StatusLine
           channel={channel}
           segments={statusSegments}
+          decorations={statusDecorations}
           selectionActive={selectionActive}
           helpOpen={helpOpen}
           wake={

@@ -16,6 +16,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { cleanScalarText } from './sanitize.js'
 import { stringWidth } from '../ink/stringWidth.js'
 import type { Theme } from '../theme.js'
+import { FOOTER_FIELD_IDS } from '../tuiDisplayPrefs.js'
 import { activationFiber, assertCallerContext, bindCallerEffect, compositionRoot, concreteService, requirePluginCaller } from './host-access.js'
 import { componentIdentityOf } from './component-identity.js'
 
@@ -75,6 +76,37 @@ export interface TuiFooterSegment {
 }
 
 export type TuiFooterSegmentDisposer = () => void
+
+/**
+ * Icons for a BUILT-IN footer field. The host keeps rendering the field and
+ * keeps its hover detail, truncation and width behaviour; a decoration only
+ * adds text on either side, so `model` still answers a hover with
+ * model/provider/context and `cache` still answers with read/write/input.
+ *
+ * `prefixByValue`/`suffixByValue` key off the field's current value, which
+ * is how a plugin ices a field it cannot read: the effort icon has to track
+ * `low`/`xhigh`/`max` at runtime and no seam exposes channel state. Keeping
+ * that a lookup table rather than a callback keeps plugin code out of the
+ * render path entirely. A value match wins over the static side.
+ */
+export interface TuiFieldDecoration {
+  readonly prefix?: string
+  readonly suffix?: string
+  readonly prefixByValue?: Readonly<Record<string, string>>
+  readonly suffixByValue?: Readonly<Record<string, string>>
+}
+
+export type TuiFieldDecorationDisposer = () => void
+
+/** Host-side normalized decoration. Not part of the plugin shim. */
+export interface TuiFieldDecorationEntry {
+  readonly field: string
+  readonly prefix: string | undefined
+  readonly suffix: string | undefined
+  readonly prefixByValue: Readonly<Record<string, string>> | undefined
+  readonly suffixByValue: Readonly<Record<string, string>> | undefined
+  readonly registrationId: number
+}
 
 /** Host-side normalized footer segment. Not part of the plugin shim. */
 export interface TuiFooterSegmentEntry {
@@ -193,10 +225,14 @@ const MAX_VIEW_ROWS = 3
 const MAX_VIEW_ROW_BUDGET = 6
 // The footer is one row shared with the built-in fields, so plugin
 // segments get a hard count AND cell budget rather than flexShrink alone.
-const MAX_FOOTER_SEGMENTS = 4
+const MAX_FOOTER_SEGMENTS = 8
 const FOOTER_SEGMENT_CELLS = 40
-const FOOTER_SEGMENT_BUDGET = 60
+const FOOTER_SEGMENT_BUDGET = 120
 const FOOTER_DETAIL_CELLS = 200
+// Decorations are icons, not content: a couple of glyphs plus a space. The
+// value map is bounded so a plugin cannot smuggle a catalog through it.
+const DECORATION_CELLS = 8
+const MAX_DECORATION_VALUES = 24
 const FOOTER_PLACEMENTS: ReadonlySet<string> = new Set<TuiFooterPlacement>(['footer-left', 'footer-right'])
 const STATUS_COLORS: ReadonlySet<string> = new Set<TuiStatusColor>(TUI_STATUS_COLORS)
 const HOST_STATUS_OWNER = Object.freeze({ kind: 'host-status-owner' })
@@ -212,11 +248,13 @@ export class TuiStatusStore {
   private readonly entries = new Map<string, { text: string; token: number; owner: object }>()
   private readonly views = new Map<string, { view: TuiStatusViewEntry; token: number; owner: object }>()
   private readonly segments = new Map<string, { segment: TuiFooterSegmentEntry; token: number; owner: object }>()
+  private readonly decorations = new Map<string, { decoration: TuiFieldDecorationEntry; token: number; owner: object }>()
   // useSyncExternalStore requires a referentially stable snapshot between
   // emits — a fresh array per call would re-render in an infinite loop.
   private snapshot: readonly TuiStatusEntry[] = []
   private viewSnapshot: readonly TuiStatusViewEntry[] = []
   private segmentSnapshot: readonly TuiFooterSegmentEntry[] = []
+  private decorationSnapshot: readonly TuiFieldDecorationEntry[] = []
 
   constructor(
     private readonly onViewError?: (key: string, error: Error) => void,
@@ -306,6 +344,31 @@ export class TuiStatusStore {
       : this.segments.size
   }
 
+  decorationOwnerOf(field: string): object | undefined {
+    return this.decorations.get(field)?.owner
+  }
+
+  /** Built-in field decorations, registration order, referentially stable. */
+  getDecorationSnapshot(): readonly TuiFieldDecorationEntry[] {
+    return this.decorationSnapshot
+  }
+
+  addDecoration(decoration: TuiFieldDecorationEntry, token: number, owner: object): void {
+    this.decorations.set(decoration.field, { decoration, token, owner })
+    this.decorationSnapshot = [...this.decorations.values()].map(entry => entry.decoration)
+    this.emit()
+  }
+
+  clearDecorationIf(field: string, token: number, owner?: object): boolean {
+    const current = this.decorations.get(field)
+    if (owner !== undefined && current?.owner !== owner) return false
+    if (current?.token !== token) return false
+    this.decorations.delete(field)
+    this.decorationSnapshot = [...this.decorations.values()].map(entry => entry.decoration)
+    this.emit()
+    return true
+  }
+
   private resnapSegments(): void {
     this.segmentSnapshot = [...this.segments.values()]
       .map(entry => entry.segment)
@@ -347,13 +410,16 @@ export class TuiStatusStore {
 
   /** Drop everything (teardown). */
   clear(): void {
-    if (this.entries.size === 0 && this.views.size === 0 && this.segments.size === 0) return
+    if (this.entries.size === 0 && this.views.size === 0 && this.segments.size === 0
+      && this.decorations.size === 0) return
     this.entries.clear()
     this.views.clear()
     this.segments.clear()
+    this.decorations.clear()
     this.snapshot = []
     this.viewSnapshot = []
     this.segmentSnapshot = []
+    this.decorationSnapshot = []
     this.emit()
   }
 
@@ -656,6 +722,181 @@ export class TuiStatusRuntime extends Service {
   ): TuiFooterSegmentDisposer | undefined {
     return setFooterSegment(this, this.ctx, segment, placement, identity)
   }
+
+  /**
+   * Decorate a BUILT-IN footer field with icons. Unlike a segment, this does
+   * not add a cell — the host still renders the field, so its hover detail,
+   * truncation and width behaviour are untouched. One decoration per field,
+   * owned by the registering activation.
+   *
+   * Refusals warn and return `undefined`, so `decorateField` is
+   * feature-detectable the same way `setSegment` is.
+   */
+  decorateField(
+    field: string,
+    decoration: TuiFieldDecoration,
+    identity?: Context,
+  ): TuiFieldDecorationDisposer | undefined {
+    return decorateFooterField(this, this.ctx, field, decoration, identity)
+  }
+}
+
+/** Sanitize one side of a decoration; '' means "not supplied". */
+function cleanDecorationSide(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return ''
+  const cleaned = cleanScalarText(value, DECORATION_CELLS)
+  return cleaned === '' ? '' : cleaned
+}
+
+/** Sanitize a value→icon lookup table; undefined when unusable. */
+function cleanDecorationMap(value: unknown, reject: () => void): Readonly<Record<string, string>> | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    reject()
+    return undefined
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length > MAX_DECORATION_VALUES) {
+    reject()
+    return undefined
+  }
+  const out: Record<string, string> = {}
+  for (const [key, raw] of entries) {
+    const cleaned = cleanDecorationSide(raw)
+    if (cleaned === undefined || cleaned === '') continue
+    out[key] = cleaned
+  }
+  return Object.keys(out).length === 0 ? undefined : Object.freeze(out)
+}
+
+/** Implementation of {@link TuiStatusRuntime.decorateField}. */
+function decorateFooterField(
+  runtime: TuiStatusRuntime,
+  ctx: Context,
+  field: string,
+  decoration: TuiFieldDecoration,
+  identity?: Context,
+): TuiFieldDecorationDisposer | undefined {
+  let caller: Context
+  try {
+    caller = requirePluginCaller(ctx, 'tuiStatus.decorateField', runtime)
+  } catch {
+    ctx.logger.warn('dsh-tui: tuiStatus.decorateField requires a live non-root plugin activation')
+    return undefined
+  }
+  if (identity !== undefined) {
+    try {
+      assertCallerContext(caller, identity, 'tuiStatus.decorateField')
+    } catch {
+      caller.logger.warn('dsh-tui: tuiStatus.decorateField rejected an identity belonging to another activation')
+      return undefined
+    }
+  }
+  const owner = activationFiber(caller)
+  if (owner === undefined) {
+    caller.logger.warn('dsh-tui: tuiStatus.decorateField requires a live activation owner')
+    return undefined
+  }
+  let normalized: string
+  try {
+    normalized = String(field ?? '').trim()
+  } catch {
+    caller.logger.warn('dsh-tui: tuiStatus.decorateField rejected an uncoercible field')
+    return undefined
+  }
+  // Only built-in field slots may be decorated; a plugin segment already
+  // owns its own text, and `jobs` is deliberately not addressable.
+  const target = FOOTER_FIELD_IDS.find(id => id.toLowerCase() === normalized.toLowerCase())
+  if (target === undefined) {
+    caller.logger.warn(`dsh-tui: tuiStatus.decorateField rejected "${normalized}" — not a built-in footer field`)
+    return undefined
+  }
+  if (typeof decoration !== 'object' || decoration === null || Array.isArray(decoration)) {
+    caller.logger.warn(`dsh-tui: tuiStatus.decorateField rejected an invalid decoration for "${target}"`)
+    return undefined
+  }
+  const raw = decoration as unknown as Record<string, unknown>
+  const prefix = cleanDecorationSide(raw.prefix)
+  const suffix = cleanDecorationSide(raw.suffix)
+  if (prefix === '' || suffix === '') {
+    caller.logger.warn(`dsh-tui: tuiStatus.decorateField rejected non-scalar icon text for "${target}"`)
+    return undefined
+  }
+  let mapRejected = false
+  const reject = (): void => { mapRejected = true }
+  const prefixByValue = cleanDecorationMap(raw.prefixByValue, reject)
+  const suffixByValue = cleanDecorationMap(raw.suffixByValue, reject)
+  if (mapRejected) {
+    caller.logger.warn(`dsh-tui: tuiStatus.decorateField rejected an invalid value map for "${target}"`)
+    return undefined
+  }
+  if (prefix === undefined && suffix === undefined
+    && prefixByValue === undefined && suffixByValue === undefined) {
+    caller.logger.warn(`dsh-tui: tuiStatus.decorateField rejected an empty decoration for "${target}"`)
+    return undefined
+  }
+  const state = statusStateFor(runtime)
+  const store = state.store
+  const existingOwner = store.decorationOwnerOf(target)
+  if (existingOwner !== undefined && existingOwner !== owner) {
+    caller.logger.warn(`dsh-tui: tuiStatus.decorateField rejected "${target}" — the field is decorated by another activation`)
+    caller.get('tuiEffectLedger')?.record(
+      {
+        operation: 'bind',
+        resource: { kind: 'status', id: `decoration:${target}` },
+        result: 'failed',
+        errorCode: 'DUPLICATE_CONTRIBUTION_ID',
+      },
+      identity,
+    )
+    return undefined
+  }
+  const had = existingOwner !== undefined
+  const token = state.nextToken++
+  store.addDecoration(
+    Object.freeze({
+      field: target,
+      prefix,
+      suffix,
+      prefixByValue,
+      suffixByValue,
+      registrationId: token,
+    }),
+    token,
+    owner,
+  )
+  let disposed = false
+  let ledgerApplied = false
+  let ownerCleanup: (() => unknown) | undefined
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    if (store.clearDecorationIf(target, token, owner) && ledgerApplied) {
+      caller.get('tuiEffectLedger')?.record(
+        { operation: 'release', resource: { kind: 'status', id: `decoration:${target}` }, result: 'applied' },
+        identity,
+      )
+    }
+    const cleanup = ownerCleanup
+    ownerCleanup = undefined
+    cleanup?.()
+  }
+  const bound = bindCallerEffect(caller, dispose, cleanup => {
+    ownerCleanup = cleanup
+  })
+  if (!bound) return undefined
+  caller.get('tuiEffectLedger')?.record(
+    {
+      operation: had ? 'replace' : 'bind',
+      resource: { kind: 'status', id: `decoration:${target}` },
+      result: 'applied',
+      ...(had ? { replaces: { resourceId: `decoration:${target}` } } : {}),
+    },
+    identity,
+  )
+  ledgerApplied = true
+  return dispose
 }
 
 /** Implementation of {@link TuiStatusRuntime.setSegment}; kept at module

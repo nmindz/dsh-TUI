@@ -4,7 +4,7 @@ import type { Color } from '../ink/styles.js'
 import { formatTokens } from '../cc/format.js'
 import { t } from '../i18n.js'
 import { formatContextUsage, DEFAULT_STATUS_BAR, FOOTER_LAYOUT_SPACER, FOOTER_LAYOUT_WILDCARD, normalizeStatusBar, type FooterFieldId, type StatusBarConfig } from '../tuiDisplayPrefs.js'
-import type { TuiFooterSegmentEntry } from '../dsh-adapter/status.js'
+import type { TuiFieldDecorationEntry, TuiFooterSegmentEntry } from '../dsh-adapter/status.js'
 import { estimateSessionCostCny, estimateSessionCostSplitCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { ActivityLine, contextPressurePct } from '../components/ActivityLine.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
@@ -15,6 +15,7 @@ import { formatJobDuration, type BackgroundJobState } from '../dsh-adapter/jobs.
 const NO_BACKGROUND_JOBS: readonly BackgroundJobState[] = []
 /** Same stable-empty trick for hosts and harnesses without the seam. */
 const NO_FOOTER_SEGMENTS: readonly TuiFooterSegmentEntry[] = []
+const NO_FIELD_DECORATIONS: readonly TuiFieldDecorationEntry[] = []
 import type { Channel } from '../dsh-adapter/channel.js'
 import { modeDisplayName } from '../sessionModes.js'
 import { MiniWake } from '../components/trajectory/MiniWake.js'
@@ -71,6 +72,9 @@ type HoverTarget =
 type FieldPart = {
   key: string
   node: React.ReactNode
+  /** The field's current plain value, when it has one. Only used to resolve
+   *  a decoration's `prefixByValue`/`suffixByValue` lookup. */
+  value?: string
   /** Present when the field shows a detail readout on hover. */
   id?: HoverTarget
   /** Present when the field's own text may be truncated: hovering pops a
@@ -113,6 +117,30 @@ const BOOL_OF: Readonly<Partial<Record<FooterSlotId, keyof StatusBarConfig>>> = 
 function slotEnabled(statusBar: StatusBarConfig, id: FooterSlotId): boolean {
   const key = BOOL_OF[id]
   return key === undefined || statusBar[key] === true
+}
+
+/**
+ * Wrap a built-in field's node with a plugin decoration's icons. The node
+ * itself is untouched, so the field keeps its hover target, tooltip and
+ * truncation; only text is added on either side. A value-keyed icon wins
+ * over the static one — that is what lets an effort icon track the level.
+ */
+function decorate(part: FieldPart, decoration: TuiFieldDecorationEntry | undefined): FieldPart {
+  if (decoration === undefined) return part
+  const value = part.value
+  const prefix = (value !== undefined ? decoration.prefixByValue?.[value] : undefined) ?? decoration.prefix
+  const suffix = (value !== undefined ? decoration.suffixByValue?.[value] : undefined) ?? decoration.suffix
+  if (prefix === undefined && suffix === undefined) return part
+  return {
+    ...part,
+    node: (
+      <>
+        {prefix === undefined ? null : <Text>{prefix}</Text>}
+        {part.node}
+        {suffix === undefined ? null : <Text>{suffix}</Text>}
+      </>
+    ),
+  }
 }
 
 /**
@@ -161,6 +189,7 @@ function FieldLine({
 export function StatusLine({
   channel,
   segments = NO_FOOTER_SEGMENTS,
+  decorations = NO_FIELD_DECORATIONS,
   selectionActive = false,
   helpOpen = false,
   wake,
@@ -168,6 +197,8 @@ export function StatusLine({
   channel: Channel
   /** Admitted plugin footer segments (`ctx.tuiStatus.setSegment`). */
   segments?: readonly TuiFooterSegmentEntry[]
+  /** Plugin icons for built-in fields (`ctx.tuiStatus.decorateField`). */
+  decorations?: readonly TuiFieldDecorationEntry[]
   selectionActive?: boolean
   helpOpen?: boolean
   /**
@@ -213,6 +244,7 @@ export function StatusLine({
   if (channel.reasoningEffort !== undefined) {
     available.set('thinking', {
       key: 'effort',
+      value: channel.reasoningEffort,
       node: <Text color="inactiveShimmer">{channel.reasoningEffort}</Text>,
     })
   }
@@ -222,6 +254,7 @@ export function StatusLine({
   if (channel.modeIndex > 0 || modeNeedsExplicitMarker) {
     available.set('mode', {
       key: 'mode',
+      value: modeDisplayName(channel.mode),
       node: (
         <Text
           color={channel.mode.plan === true ? 'planMode' : 'warning'}
@@ -352,6 +385,7 @@ export function StatusLine({
   available.set('model', {
     key: 'model',
     id: 'model',
+    value: channel.model,
     node: <Text color="inactiveShimmer">{channel.model}</Text>,
   })
   available.set('tokens', {
@@ -394,6 +428,7 @@ export function StatusLine({
     available.set('git', {
       key: 'git',
       id: 'git',
+      value: channel.gitBranch,
       node: <Text color="professionalBlue">{channel.gitBranch}</Text>,
     })
   }
@@ -429,10 +464,17 @@ export function StatusLine({
 
   // Stock selection: preference-gated, stock order. `ctx` stays out of the
   // left group here — the render below still owns its compact/full placement.
+  // Plugin icons for built-in fields. Minimal mode drops them with every
+  // other plugin contribution.
+  const decorationOf = new Map(
+    (channel.minimal ? NO_FIELD_DECORATIONS : decorations).map(entry => [entry.field, entry]),
+  )
+  const slotPart = (id: FooterSlotId): FieldPart =>
+    decorate(available.get(id)!, decorationOf.get(id))
   const pickSlots = (ids: readonly FooterSlotId[]): FieldPart[] =>
     ids
       .filter(id => slotEnabled(statusBar, id) && available.has(id))
-      .map(id => available.get(id)!)
+      .map(slotPart)
 
   // Plugin footer segments: text-only, host-built cells. Minimal mode and
   // the `pluginSegments` switch drop them wholesale, and the store has
@@ -470,7 +512,7 @@ export function StatusLine({
           .map(segmentPart)
       }
       const builtIn = available.get(token as FooterSlotId)
-      if (builtIn !== undefined) return [builtIn]
+      if (builtIn !== undefined) return [slotPart(token as FooterSlotId)]
       const segment = segmentByKey.get(token)
       // Unknown tokens (a typo, or a plugin that never registered) resolve
       // to nothing; the config layer owns warning about them.
@@ -487,7 +529,7 @@ export function StatusLine({
     // The jobs chip is never addressable, so a layout cannot drop it; it
     // leads the left group rather than sitting at its stock position.
     const jobs = available.get('jobs')
-    leftFields = [...(jobs === undefined ? [] : [jobs]), ...resolveTokens(leftTokens)]
+    leftFields = [...(jobs === undefined ? [] : [slotPart('jobs')]), ...resolveTokens(leftTokens)]
     rightFields = resolveTokens(rightTokens)
     // `ctx` resolves inline at its token position under a layout, so the
     // compact renderer's pinned-right box is not used.
@@ -503,7 +545,7 @@ export function StatusLine({
       ...pickSlots(STOCK_RIGHT),
       ...pluginSegments.filter(entry => entry.placement === 'footer-right').map(segmentPart),
     ]
-    ctxRender = statusBar.contextUsage ? available.get('ctx')?.node : undefined
+    ctxRender = statusBar.contextUsage && available.has('ctx') ? slotPart('ctx').node : undefined
   }
 
   const hint = selectionActive
