@@ -3870,9 +3870,16 @@ export function Chat({
           // Plugin status contributions (tuiStatus seam): one joined line,
           // truncated by the Text wrap contract — the host owns the layout,
           // plugins own only their text.
-          <Text dimColor wrap="truncate">
-            {statusEntries.map(entry => entry.text).join(' · ')}
-          </Text>
+          //
+          // marginTop matches every sibling chrome block (goal panel, recap
+          // row, balance row). Without it the line butts straight against
+          // whatever rendered last — a plugin path sitting flush under the
+          // goal summary reads as one wrapped paragraph.
+          <Box marginTop={1} flexShrink={0}>
+            <Text dimColor wrap="truncate">
+              {statusEntries.map(entry => entry.text).join(' · ')}
+            </Text>
+          </Box>
         )}
         {activePreview === null && statusViews.map(view => (
           <PluginStatusViewBoundary
