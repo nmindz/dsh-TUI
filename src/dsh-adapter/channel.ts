@@ -1304,7 +1304,8 @@ export interface Channel {
    *  re-renders the indicator immediately; false when the name is unknown
    *  or the preference cannot be written. */
   setActivityFrames(name: string): boolean
-  /** Advertised models across every registered provider route (empty when the LLM service is absent). */
+  /** Advertised models across every registered provider route (empty when the LLM service is absent).
+   *  A route that lists nothing still has a `/model` group row — see listProviders. */
   listModels(): Promise<readonly LlmModelInfo[]>
   /** Provider display identities for the same routes (picker group labels). */
   listProviders(): Promise<readonly LlmProviderInfo[]>
@@ -4140,7 +4141,7 @@ export function createChannel(
       state.emit()
     }).catch(() => {
       if (generation !== modelNodeCache.generation) return
-      // listModels already swallows per-provider failures; this only fires
+      // listModels already contains per-provider failures; this only fires
       // when the llm service shape itself is missing — settle on an empty
       // menu rather than retrying on every keystroke.
       modelNodeCache.nodes = []
@@ -6656,7 +6657,13 @@ export function createChannel(
         | undefined
       if (!llm) return Promise.resolve([])
       const providers = llm.listProviders()
-      return Promise.all(providers.map(provider => llm.listModels(provider.id).catch(() => [])))
+      // One route's failure must not strand the rest, but it is logged rather
+      // than swallowed silently — its group row survives via listProviders,
+      // and the log is the only place the reason can still be read.
+      return Promise.all(providers.map(provider => llm.listModels(provider.id).catch((error: unknown) => {
+        ctx.logger.warn(`dsh-tui: provider route "${provider.id}" listed no models: %o`, error)
+        return [] as readonly LlmModelInfo[]
+      })))
         .then(lists => lists.flat())
     },
     listProviders() {

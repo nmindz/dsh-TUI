@@ -463,10 +463,10 @@ const GROUPS = {
 // 匹配、北京时间高峰/空闲时段边界、缓存命中计价、未知模型与零 token
 // 不估算、官方 provider 判定。注入 fake fetch，不发真实请求。
     ["verify-balance", ['node', '--import', 'tsx/esm', 'scripts/verify-balance.tsx']],
-// /model 二级选择器派生回归：provider 分组（首现排序、显示名回退、
-// 计数）与落焦规则（多 provider 聚焦当前组、单 provider 直达模型层、
-// 缺席当前 provider 落首行）。键盘与 overlay 归约由 verify-chat-overlay
-// 覆盖，这里钉住两层共用的纯派生。
+// /model 二级选择器派生回归：provider 分组（注册表排序、显示名回退、
+// 计数、零模型路由保留行）与落焦规则（多 provider 聚焦当前组、单
+// provider 直达模型层、缺席当前 provider 落首行）。键盘与 overlay 归约
+// 由 verify-chat-overlay 覆盖，这里钉住两层共用的纯派生。
     ["verify-model-picker-groups", ['node', 'scripts/verify-model-picker-groups.mjs']],
 // 全屏出厂默认迁移回归（0.9.x schema + cordis.patch.yml false→true 翻转）：
 // 翻转前钉在 settings 用户层的显式 false 首启被 unset 一次（marker 仅在

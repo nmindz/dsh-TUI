@@ -351,7 +351,7 @@ dsh-TUI 不预装通用技能。`/skills` 浏览 DSH 从当前 profile、用户�
 
 ### 4.6 模型切换与预设
 
-- `/model`：选择器，**切换 = fork 会话续聊**（历史保留、只换 provider/model 路由，preset 不变）；旧会话留在 `/resume`；选择持久化 `~/.dsh-tui/model.json`。运行时切换被拒绝。
+- `/model`：选择器，**切换 = fork 会话续聊**（历史保留、只换 provider/model 路由，preset 不变）；旧会话留在 `/resume`；选择持久化 `~/.dsh-tui/model.json`。运行时切换被拒绝。分组层列出 llm 注册表里的**全部**路由：目录为空的路由（未登录的 OAuth 路由、被抢占的路由、配置为空的目录）显示为「无可用模型」而不是被隐藏，回车会说明原因而不进入空列表。
 - `/preset`：`standard`（默认全功能）/ `ptc`（PTC）/ `minimal`（仅 bash+编辑器，无 compaction）/ `cordis`（创造模式）/ `liangshen`（梁神模式：首轮最小双工具，首次工具调用后开放全目录）。0.1.2 名册会把旧版 `code` 作为 `ptc` 的兼容别名；旧 0.1.1 名册仍使用 `code` 真名。
   **已产生对话的会话不可切换**（blank-only：选择只保存为下次 `/new` 的默认）。
 - 会话模式 `Shift+Tab` 循环三档：default（workspace-write + 审批）→ plan（read-only）→ full（danger-full-access）。
