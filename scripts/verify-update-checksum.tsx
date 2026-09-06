@@ -101,7 +101,13 @@ const MANIFEST_STREAM_CHUNKS = 128 // 总量 2MB，注入上限 64KB → 中断�
 const realAssetBytes = makeAssetArchive('legit-new-binary\n')
 const evilAssetBytes = makeAssetArchive('evil-tampered-binary\n')
 const realDigest = createHash('sha256').update(realAssetBytes).digest('hex')
-const ASSET_NAME = 'dsh-tui-standalone-linux-x64.tar.gz'
+// Derived, never hardcoded: the updater resolves its asset through
+// getStandaloneAssetName(), which is platform- and arch-specific. A
+// linux-x64 literal made every fixture URL and manifest line miss on any
+// other host — the stubbed fetch fell through to 404, and the manifest
+// carried no entry for the asset actually requested — so this file passed
+// on CI and failed on a macOS or arm64 developer machine.
+const ASSET_NAME = (updateModule.getStandaloneAssetName as () => string)()
 
 const server = http.createServer(async (req, res) => {
   const url = req.url ?? ''
