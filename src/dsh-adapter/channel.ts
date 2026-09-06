@@ -6675,7 +6675,35 @@ export function createChannel(
       const llm = ctx.get('llm') as
         | { listProviders(): readonly { id: string; name: string }[] }
         | undefined
-      return Promise.resolve(llm === undefined ? [] : llm.listProviders().map(info => ({ ...info })))
+      if (llm === undefined) return Promise.resolve([])
+      // The registry lists every route it can serve, which includes catalog
+      // adapter families nobody configured (openai/xai/deepseek ship
+      // mounted). Those must not become picker rows: entering one can only
+      // report "unavailable", and offering a provider the user never set up
+      // is noise. Keep the registry's order and names, but admit only
+      // routes that a profile actually declares.
+      //
+      // The RESOLVED section, not the user layer: a route inherited from a
+      // composition base is configured and usable even though `/provider`
+      // cannot edit it. A provider absent here but present in the catalog
+      // still gets a row — modelGroups unions the model list in.
+      const settings = ctx.get('settings') as
+        | { get(ns: string): unknown }
+        | undefined
+      const section = settings?.get('llm-pi-ai') as
+        | { providers?: Record<string, unknown> }
+        | undefined
+      const configured = section?.providers
+      // No settings service (or no section at all): fall back to the full
+      // registry rather than blanking the picker's top level.
+      if (configured === undefined || typeof configured !== 'object' || configured === null) {
+        return Promise.resolve(llm.listProviders().map(info => ({ ...info })))
+      }
+      return Promise.resolve(
+        llm.listProviders()
+          .filter(info => Object.hasOwn(configured, info.id))
+          .map(info => ({ ...info })),
+      )
     },
     invalidateModelCompletion() {
       // `/provider` changed the catalog (add/edit/delete/OAuth): the next
