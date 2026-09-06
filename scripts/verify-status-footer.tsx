@@ -135,16 +135,33 @@ function segment(
   }
 }
 
+function decoration(field: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    field,
+    prefix: undefined,
+    suffix: undefined,
+    prefixByValue: undefined,
+    suffixByValue: undefined,
+    registrationId: nextRegistration++,
+    ...extra,
+  }
+}
+
 async function renderFooter(
   overrides: Record<string, unknown> = {},
   segments: readonly Record<string, unknown>[] = [],
   columns = 140,
+  decorations: readonly Record<string, unknown>[] = [],
 ): Promise<string> {
   const harness = makeHarness(columns)
   const channel = { ...baseChannel, ...overrides }
   const instance = await render(
     <ThemeProvider theme="dark">
-      <StatusLine channel={channel as never} segments={segments as never} />
+      <StatusLine
+        channel={channel as never}
+        segments={segments as never}
+        decorations={decorations as never}
+      />
     </ThemeProvider>,
     {
       stdout: harness.stdout as NodeJS.WriteStream,
@@ -381,6 +398,67 @@ await checkAsync('segments render in store order (order then registration)', asy
     segment('probe:second', 'SECOND'),
   ])
   assert.ok(columnOf(screen, 'FIRST') < columnOf(screen, 'SECOND'), screen)
+})
+
+// ── field decorations ──────────────────────────────────────────────────
+
+await checkAsync('a static prefix decorates a built-in field', async () => {
+  const screen = await renderFooter({}, [], 140, [decoration('model', { prefix: 'M> ' })])
+  assert.ok(screen.includes('M> footer-model-probe'), screen)
+})
+
+await checkAsync('a suffix renders after the field', async () => {
+  const screen = await renderFooter({}, [], 140, [decoration('model', { suffix: ' <M' })])
+  assert.ok(screen.includes('footer-model-probe <M'), screen)
+})
+
+await checkAsync('prefixByValue selects on the field current value', async () => {
+  const byValue = { max: 'MAX> ', xhigh: 'XH> ' }
+  const high = await renderFooter(
+    { reasoningEffort: 'xhigh' }, [], 140, [decoration('thinking', { prefixByValue: byValue })],
+  )
+  assert.ok(high.includes('XH> xhigh'), high)
+  const max = await renderFooter(
+    { reasoningEffort: 'max' }, [], 140, [decoration('thinking', { prefixByValue: byValue })],
+  )
+  assert.ok(max.includes('MAX> max'), max)
+})
+
+await checkAsync('a value match wins over the static prefix', async () => {
+  const screen = await renderFooter(
+    { reasoningEffort: 'max' }, [], 140,
+    [decoration('thinking', { prefix: 'S> ', prefixByValue: { max: 'V> ' } })],
+  )
+  assert.ok(screen.includes('V> max'), screen)
+  assert.ok(!screen.includes('S> max'), screen)
+})
+
+await checkAsync('an unmatched value falls back to the static prefix', async () => {
+  const screen = await renderFooter(
+    { reasoningEffort: 'low' }, [], 140,
+    [decoration('thinking', { prefix: 'S> ', prefixByValue: { max: 'V> ' } })],
+  )
+  assert.ok(screen.includes('S> low'), screen)
+})
+
+await checkAsync('decorating does not disturb the stock field order', async () => {
+  const stock = await renderFooter()
+  const decorated = await renderFooter({}, [], 140, [decoration('cache', { prefix: 'C' })])
+  assert.equal(columnOf(stock, 'footer-model-probe'), columnOf(decorated, 'footer-model-probe'))
+})
+
+await checkAsync('decorations apply under an explicit layout too', async () => {
+  const screen = await renderFooter(
+    { statusBar: { ...DEFAULT_STATUS_BAR, layout: ['model', '|', 'cwd'] } },
+    [], 140, [decoration('model', { prefix: 'L> ' })],
+  )
+  assert.ok(screen.includes('L> footer-model-probe'), screen)
+})
+
+await checkAsync('minimal mode drops decorations', async () => {
+  const screen = await renderFooter({ minimal: true }, [], 140, [decoration('model', { prefix: 'M> ' })])
+  assert.ok(!screen.includes('M> '), screen)
+  assert.ok(screen.includes('footer-model-probe'), screen)
 })
 
 console.log(`\nAll ${checks} status-footer checks passed.`)

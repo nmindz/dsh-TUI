@@ -51,6 +51,8 @@ export { TUI_STATUS_COLORS, TuiStatusRuntime, TuiStatusStore } from './dsh-adapt
 // `TuiFooterSegmentEntry` is host-only (the normalized store shape) and is
 // deliberately absent, exactly as `TuiStatusViewEntry` is.
 export type {
+  TuiFieldDecoration,
+  TuiFieldDecorationDisposer,
   TuiFooterPlacement,
   TuiFooterSegment,
   TuiFooterSegmentDisposer,
