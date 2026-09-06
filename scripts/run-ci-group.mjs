@@ -482,6 +482,11 @@ const GROUPS = {
 // 说“不可用”）。同时钉住：已配置但零模型的路由保留行；无 settings 服务
 // 时回落整份注册表而非空列表。
     ["verify-provider-listing", ['node', 'scripts/verify-provider-listing.mjs']],
+// 回合失败通知的重放边界：turn/end error 的转录 notice 属于历史，重放必须
+// 照画；toast 是「刚刚发生」的播报，重放时再弹等于把该会话历史上每次失败
+// 都重新报一遍（resume 一个曾撞上 provider 529 的会话会凭空弹
+// "Turn error · Overloaded"）。同时钉住 live 事件仍然弹。
+    ["verify-turn-error-replay", ['node', 'scripts/verify-turn-error-replay.mjs']],
 // 全屏出厂默认迁移回归（0.9.x schema + cordis.patch.yml false→true 翻转）：
 // 翻转前钉在 settings 用户层的显式 false 首启被 unset 一次（marker 仅在
 // 写入成功后落盘，失败下次自愈重试），此后再写的 false 是用户主动选择
