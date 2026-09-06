@@ -33,8 +33,34 @@ export interface ModelGroupRow {
   readonly provider: string
   /** Display label — the registry's provider name, falling back to the route key. */
   readonly label: string
-  /** How many of the listed models belong to this provider. */
+  /** How many of the listed models belong to this provider; 0 = registered
+   *  but listing nothing (signed-out OAuth route, empty configured catalog,
+   *  or a listing that failed), which the picker renders as unavailable. */
   readonly count: number
+}
+
+/**
+ * The route keys the picker's top level covers, in registry order.
+ *
+ * Registered routes come first, in `listProviders()` order — the order
+ * `Channel.listModels()` flattens its per-route lists in — so a route that
+ * lists **no** models still gets a row. Deriving the top level from the model
+ * list alone made such a route vanish from `/model` with nothing to say why.
+ * Any provider seen only in `models` is appended, so a catalog richer than
+ * the directory is never truncated.
+ */
+function routeOrder(
+  models: readonly LlmModelInfo[],
+  providerInfos: readonly LlmProviderInfo[],
+): string[] {
+  const order: string[] = []
+  for (const info of providerInfos) {
+    if (!order.includes(info.id)) order.push(info.id)
+  }
+  for (const model of models) {
+    if (!order.includes(model.provider)) order.push(model.provider)
+  }
+  return order
 }
 
 /**
@@ -60,29 +86,25 @@ export function recentCatalogModels(
 }
 
 /**
- * Group a flat model catalog into provider rows, first-appearance order
- * (the registry's own listing order), labels resolved through
- * `providerInfos` with a route-key fallback. Recent refs (when supplied and
- * still catalogued) pin one extra pseudo-group at the top.
+ * Group a flat model catalog into provider rows in registry order, labels
+ * resolved through `providerInfos` with a route-key fallback. Every route in
+ * `providerInfos` gets a row even when it lists nothing (`count === 0`).
+ * Recent refs (when supplied and still catalogued) pin one extra pseudo-group
+ * at the top.
  */
 export function deriveModelGroups(
   models: readonly LlmModelInfo[],
   providerInfos: readonly LlmProviderInfo[],
   recents?: readonly ModelRef[],
 ): readonly ModelGroupRow[] {
-  const order: string[] = []
   const counts = new Map<string, number>()
   for (const model of models) {
-    if (!counts.has(model.provider)) {
-      order.push(model.provider)
-      counts.set(model.provider, 0)
-    }
-    counts.set(model.provider, counts.get(model.provider)! + 1)
+    counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1)
   }
-  const groups: ModelGroupRow[] = order.map(provider => ({
+  const groups: ModelGroupRow[] = routeOrder(models, providerInfos).map(provider => ({
     provider,
     label: providerInfos.find(info => info.id === provider)?.name ?? provider,
-    count: counts.get(provider)!,
+    count: counts.get(provider) ?? 0,
   }))
   if (recents !== undefined) {
     const recentCount = recentCatalogModels(recents, models).length
@@ -115,17 +137,20 @@ export interface ModelPickerLanding {
  * current model (the picker seeds it): drilling straight into the only
  * provider's list beats a top level whose recents row duplicates it. Two or
  * more recents (or any multi-provider catalog) land at the top level.
+ *
+ * @param providerInfos - the registered routes, so the landing counts the same
+ *   rows {@link deriveModelGroups} renders. Omitted (or empty) it falls back to
+ *   the routes the models themselves name — which is what the second-level
+ *   callers want, since they pass one group's models to get an index inside it.
  */
 export function modelPickerLanding(
   models: readonly LlmModelInfo[],
   currentProvider: string | undefined,
   currentModel: string | undefined,
   recents?: readonly ModelRef[],
+  providerInfos?: readonly LlmProviderInfo[],
 ): ModelPickerLanding {
-  const providers: string[] = []
-  for (const model of models) {
-    if (!providers.includes(model.provider)) providers.push(model.provider)
-  }
+  const providers = routeOrder(models, providerInfos ?? [])
   if (providers.length === 0) return { group: undefined, index: 0 }
   const recentCount = recents === undefined ? 0 : recentCatalogModels(recents, models).length
   if (providers.length === 1 && recentCount <= 1) {

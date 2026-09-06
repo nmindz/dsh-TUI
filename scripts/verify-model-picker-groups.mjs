@@ -1,8 +1,9 @@
 /**
  * Headless regression for the two-level `/model` picker derivation
  * (src/modelGroups.ts + src/modelRecents.ts): provider grouping
- * (first-appearance order, display labels with route-key fallback,
- * per-group counts), the pinned "recently used" pseudo-group (catalog
+ * (registry order, display labels with route-key fallback, per-group
+ * counts, rows kept for routes that list nothing), the pinned "recently
+ * used" pseudo-group (catalog
  * intersection, cap, vanishing entries), the landing rule (recents row,
  * current provider's group, single-provider fast path without recents), and
  * the recents file (move-to-front dedupe, cap, round-trip, corrupt reset).
@@ -51,11 +52,32 @@ const model = (provider, id) => ({ provider, id, name: id })
     { id: 'openai-codex', name: 'OpenAI Codex' },
   ]
   const groups = deriveModelGroups(models, infos)
-  check('1 grouping: first-appearance order', eq(groups.map(g => g.provider), ['deepseek-official', 'openai-codex', 'xai']))
+  check('1 grouping: registry order, catalog-only routes appended',
+    eq(groups.map(g => g.provider), ['deepseek-official', 'openai-codex', 'xai']))
   check('1 grouping: registry labels with route-key fallback',
     eq(groups.map(g => g.label), ['DeepSeek', 'OpenAI Codex', 'xai']))
   check('1 grouping: counts include interleaved members', eq(groups.map(g => g.count), [3, 1, 1]))
-  check('1 grouping: empty catalog yields no groups', eq(deriveModelGroups([], infos), []))
+  check('1 grouping: no registry and no models yields no groups', eq(deriveModelGroups([], []), []))
+}
+
+// 1b. a registered route that lists NO models keeps its row (count 0). Losing
+//     it is how a settings-configured provider that lost the registration race
+//     to another adapter family used to vanish from /model without a word.
+{
+  const models = [model('deepseek-official', 'deepseek-chat')]
+  const infos = [
+    { id: 'deepseek-official', name: 'DeepSeek' },
+    { id: 'anthropic', name: 'Anthropic' },
+    { id: 'xai', name: 'xAI' },
+  ]
+  const groups = deriveModelGroups(models, infos)
+  check('1b unavailable: every registered route keeps a row',
+    eq(groups.map(g => g.provider), ['deepseek-official', 'anthropic', 'xai']))
+  check('1b unavailable: routes listing nothing report count 0',
+    eq(groups.map(g => g.count), [1, 0, 0]))
+  check('1b unavailable: an all-empty registry still renders its rows',
+    eq(deriveModelGroups([], infos).map(g => `${g.provider}:${g.count}`),
+      ['deepseek-official:0', 'anthropic:0', 'xai:0']))
 }
 
 // 2. landing: single-provider fast path.
@@ -67,6 +89,10 @@ const model = (provider, id) => ({ provider, id, name: id })
     eq(modelPickerLanding(models, 'openai-codex', 'x'), { group: 'deepseek-official', index: 0 }))
   check('2 single: no current model lands on the first row',
     eq(modelPickerLanding(models, undefined, undefined), { group: 'deepseek-official', index: 0 }))
+  check('2 single: a second registered route retires the fast path',
+    eq(modelPickerLanding(models, 'deepseek-official', 'b', undefined,
+      [{ id: 'deepseek-official', name: 'DeepSeek' }, { id: 'anthropic', name: 'Anthropic' }]),
+    { group: undefined, index: 0 }))
 }
 
 // 3. landing: multi-provider top level.
@@ -83,6 +109,13 @@ const model = (provider, id) => ({ provider, id, name: id })
     eq(modelPickerLanding(models, 'anthropic', 'claude'), { group: undefined, index: 0 }))
   check('3 multi: no current provider lands on the first group',
     eq(modelPickerLanding(models, undefined, undefined), { group: undefined, index: 0 }))
+  check('3 multi: landing counts registered routes, not just catalogued ones',
+    eq(modelPickerLanding(models, 'xai', 'grok-code', undefined, [
+      { id: 'anthropic', name: 'Anthropic' },
+      { id: 'deepseek-official', name: 'DeepSeek' },
+      { id: 'openai-codex', name: 'OpenAI Codex' },
+      { id: 'xai', name: 'xAI' },
+    ]), { group: undefined, index: 3 }))
 }
 
 // 4. landing: empty catalog.

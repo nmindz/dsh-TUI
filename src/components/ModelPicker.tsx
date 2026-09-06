@@ -22,6 +22,10 @@ import { listWindow } from './listWindow.js'
  * single-group catalog skips the top level entirely (showBack=false, plain
  * confirm/exit hint), so single-provider setups keep the pre-grouping UX.
  *
+ * A registered route listing zero models still gets a row, marked unavailable
+ * rather than dropped — a provider that silently disappears from the picker is
+ * indistinguishable from one that was never configured.
+ *
  * 长列表按焦点窗口化（Select 同款）：picker 经 OverlayAbove 浮层挂载后有
  * maxHeight 裁剪，全量渲染会让焦点行被裁掉（看不到焦点按 Enter）。
  */
@@ -79,7 +83,9 @@ export function ModelPicker(props:
               key={row.provider}
               isFocused={absoluteIndex === props.focusIndex}
               isSelected={row.provider === props.currentProvider}
-              description={t('picker-group-count', { count: row.count })}
+              description={row.count === 0
+                ? t('picker-group-unavailable')
+                : t('picker-group-count', { count: row.count })}
               showScrollUp={absoluteIndex === start && start > 0}
               showScrollDown={absoluteIndex === end - 1 && end < rows.length}
               onClick={onPick ? () => onPick(absoluteIndex) : undefined}
