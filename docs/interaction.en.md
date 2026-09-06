@@ -54,6 +54,8 @@ slash command or `tuiShortcuts`. A refused rich registration returns
 `undefined`; an admitted registration returns a disposer that removes both
 the view and its Cordis effect.
 
+Plugins may also contribute text-only segments to the **status footer** through `tuiStatus.setSegment`: `{ key, text, color?, dim?, order?, detail?, tooltip? }`, with a placement of `footer-left` or `footer-right` (the former by default). Segments are structured text rather than React — the footer's width-stability and truncation contracts belong to the host, so a plugin supplies content and the host builds the cell. `color` is restricted to an allowlist of theme tokens (raw hex/ANSI is refused, so a segment stays readable after a theme switch), text is capped in terminal cells (40 per segment), and the whole surface is bounded by a 4-segment / 60-cell budget. Keys share one namespace with `set`/`registerView`, and a key may own exactly one surface. `detail` fills the supplemental row on hover; `tooltip` pops when the rendered text truncates. Segments append after the built-in fields of their group, so adding one never disturbs the stock order. `/settings → Show plugin segments` turns them off wholesale, and minimal mode never renders them. Feature-detect with `typeof status?.setSegment === 'function'` to degrade to the prompt-above line on older hosts.
+
 ## Editing keys
 
 | Key | Behavior |

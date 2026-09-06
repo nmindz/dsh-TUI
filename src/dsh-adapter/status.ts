@@ -14,6 +14,8 @@
 import type React from 'react'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { cleanScalarText } from './sanitize.js'
+import { stringWidth } from '../ink/stringWidth.js'
+import type { Theme } from '../theme.js'
 import { activationFiber, assertCallerContext, bindCallerEffect, compositionRoot, concreteService, requirePluginCaller } from './host-access.js'
 import { componentIdentityOf } from './component-identity.js'
 
@@ -21,6 +23,70 @@ import { componentIdentityOf } from './component-identity.js'
 export interface TuiStatusEntry {
   readonly key: string
   readonly text: string
+}
+
+/** Where a status contribution renders: the line above the prompt, or a
+ *  group in the status footer under it. */
+export type TuiStatusPlacement = 'prompt' | 'footer-left' | 'footer-right'
+
+/** Footer-only subset accepted by {@link TuiStatusRuntime.setSegment}. */
+export type TuiFooterPlacement = Exclude<TuiStatusPlacement, 'prompt'>
+
+/**
+ * Theme tokens a footer segment may request. Restricted to an allowlist so
+ * a segment retheme with the host — raw hex/ANSI is never accepted, which
+ * is what keeps a plugin from painting unreadable text on a light theme.
+ */
+export const TUI_STATUS_COLORS = [
+  'text',
+  'inactive',
+  'inactiveShimmer',
+  'subtle',
+  'suggestion',
+  'remember',
+  'success',
+  'warning',
+  'error',
+  'planMode',
+  'permission',
+  'professionalBlue',
+  'chromeYellow',
+  'toolDotTask',
+] as const satisfies readonly (keyof Theme)[]
+
+export type TuiStatusColor = typeof TUI_STATUS_COLORS[number]
+
+/** One text-only footer contribution. Structured rather than free React:
+ *  the footer's width-stability and truncation contracts belong to the
+ *  host, so a plugin supplies content and the host builds the cell. */
+export interface TuiFooterSegment {
+  /** Shares the keyed status namespace with `set`/`registerView`. */
+  readonly key: string
+  /** Sanitized and capped in terminal cells. */
+  readonly text: string
+  readonly color?: TuiStatusColor
+  readonly dim?: boolean
+  /** Sort weight inside its group; ties fall back to registration order. */
+  readonly order?: number
+  /** Supplemental-row readout while the pointer dwells on this segment. */
+  readonly detail?: string
+  /** Full string popped when the rendered text truncates. */
+  readonly tooltip?: string
+}
+
+export type TuiFooterSegmentDisposer = () => void
+
+/** Host-side normalized footer segment. Not part of the plugin shim. */
+export interface TuiFooterSegmentEntry {
+  readonly key: string
+  readonly placement: TuiFooterPlacement
+  readonly text: string
+  readonly color: TuiStatusColor | undefined
+  readonly dim: boolean
+  readonly order: number
+  readonly detail: string | undefined
+  readonly tooltip: string | undefined
+  readonly registrationId: number
 }
 
 /** Maximum height a rich status contribution may request. */
@@ -125,6 +191,14 @@ const TEXT_CELLS = 200
 const MAX_ENTRIES = 20
 const MAX_VIEW_ROWS = 3
 const MAX_VIEW_ROW_BUDGET = 6
+// The footer is one row shared with the built-in fields, so plugin
+// segments get a hard count AND cell budget rather than flexShrink alone.
+const MAX_FOOTER_SEGMENTS = 4
+const FOOTER_SEGMENT_CELLS = 40
+const FOOTER_SEGMENT_BUDGET = 60
+const FOOTER_DETAIL_CELLS = 200
+const FOOTER_PLACEMENTS: ReadonlySet<string> = new Set<TuiFooterPlacement>(['footer-left', 'footer-right'])
+const STATUS_COLORS: ReadonlySet<string> = new Set<TuiStatusColor>(TUI_STATUS_COLORS)
 const HOST_STATUS_OWNER = Object.freeze({ kind: 'host-status-owner' })
 
 /** Cordis-free text + view store. Render order is first-set/register order
@@ -137,10 +211,12 @@ export class TuiStatusStore {
   // same status text).
   private readonly entries = new Map<string, { text: string; token: number; owner: object }>()
   private readonly views = new Map<string, { view: TuiStatusViewEntry; token: number; owner: object }>()
+  private readonly segments = new Map<string, { segment: TuiFooterSegmentEntry; token: number; owner: object }>()
   // useSyncExternalStore requires a referentially stable snapshot between
   // emits — a fresh array per call would re-render in an infinite loop.
   private snapshot: readonly TuiStatusEntry[] = []
   private viewSnapshot: readonly TuiStatusViewEntry[] = []
+  private segmentSnapshot: readonly TuiFooterSegmentEntry[] = []
 
   constructor(
     private readonly onViewError?: (key: string, error: Error) => void,
@@ -187,6 +263,55 @@ export class TuiStatusStore {
     return this.views.get(key)?.owner
   }
 
+  segmentOwnerOf(key: string): object | undefined {
+    return this.segments.get(key)?.owner
+  }
+
+  /** Footer segments, sorted by declared `order` then registration order so
+   *  a late re-set never makes a segment jump. Referentially stable. */
+  getSegmentSnapshot(): readonly TuiFooterSegmentEntry[] {
+    return this.segmentSnapshot
+  }
+
+  addSegment(segment: TuiFooterSegmentEntry, token: number, owner: object): void {
+    this.segments.set(segment.key, { segment, token, owner })
+    this.resnapSegments()
+    this.emit()
+  }
+
+  clearSegmentIf(key: string, token: number, owner?: object): boolean {
+    const current = this.segments.get(key)
+    if (owner !== undefined && current?.owner !== owner) return false
+    if (current?.token !== token) return false
+    this.segments.delete(key)
+    this.resnapSegments()
+    this.emit()
+    return true
+  }
+
+  /** Total cells the admitted segments occupy — the runtime checks a new
+   *  registration against the aggregate budget through this. */
+  segmentCells(excludeKey?: string): number {
+    let total = 0
+    for (const [key, entry] of this.segments) {
+      if (key === excludeKey) continue
+      total += stringWidth(entry.segment.text)
+    }
+    return total
+  }
+
+  segmentCount(excludeKey?: string): number {
+    return excludeKey !== undefined && this.segments.has(excludeKey)
+      ? this.segments.size - 1
+      : this.segments.size
+  }
+
+  private resnapSegments(): void {
+    this.segmentSnapshot = [...this.segments.values()]
+      .map(entry => entry.segment)
+      .sort((a, b) => a.order - b.order || a.registrationId - b.registrationId)
+  }
+
   addView(view: TuiStatusViewEntry, token: number, owner: object): void {
     this.views.set(view.key, { view, token, owner })
     this.viewSnapshot = [...this.views.values()].map(entry => entry.view)
@@ -222,11 +347,13 @@ export class TuiStatusStore {
 
   /** Drop everything (teardown). */
   clear(): void {
-    if (this.entries.size === 0 && this.views.size === 0) return
+    if (this.entries.size === 0 && this.views.size === 0 && this.segments.size === 0) return
     this.entries.clear()
     this.views.clear()
+    this.segments.clear()
     this.snapshot = []
     this.viewSnapshot = []
+    this.segmentSnapshot = []
     this.emit()
   }
 
@@ -514,6 +641,173 @@ export class TuiStatusRuntime extends Service {
     ledgerApplied = true
     return dispose
   }
+
+  /**
+   * Register (or replace) one text-only footer segment. Same key namespace,
+   * ownership and disposal contract as `set`; the difference is placement
+   * and that the host owns the rendered cell. Refusals warn and return
+   * `undefined`, so `typeof status?.setSegment === 'function'` plus an
+   * `undefined` result together give a plugin a complete feature test.
+   */
+  setSegment(
+    segment: TuiFooterSegment,
+    placement: TuiFooterPlacement = 'footer-left',
+    identity?: Context,
+  ): TuiFooterSegmentDisposer | undefined {
+    return setFooterSegment(this, this.ctx, segment, placement, identity)
+  }
+}
+
+/** Implementation of {@link TuiStatusRuntime.setSegment}; kept at module
+ *  scope so the class body stays readable. */
+function setFooterSegment(
+  runtime: TuiStatusRuntime,
+  ctx: Context,
+  segment: TuiFooterSegment,
+  placement: TuiFooterPlacement,
+  identity?: Context,
+): TuiFooterSegmentDisposer | undefined {
+  let caller: Context
+  try {
+    caller = requirePluginCaller(ctx, 'tuiStatus.setSegment', runtime)
+  } catch {
+    ctx.logger.warn('dsh-tui: tuiStatus.setSegment requires a live non-root plugin activation')
+    return undefined
+  }
+  if (identity !== undefined) {
+    try {
+      assertCallerContext(caller, identity, 'tuiStatus.setSegment')
+    } catch {
+      caller.logger.warn('dsh-tui: tuiStatus.setSegment rejected an identity belonging to another activation')
+      return undefined
+    }
+  }
+  const owner = activationFiber(caller)
+  if (owner === undefined) {
+    caller.logger.warn('dsh-tui: tuiStatus.setSegment requires a live activation owner')
+    return undefined
+  }
+  if (typeof segment !== 'object' || segment === null || Array.isArray(segment)) {
+    caller.logger.warn('dsh-tui: tuiStatus.setSegment rejected an invalid segment')
+    return undefined
+  }
+  if (!FOOTER_PLACEMENTS.has(placement)) {
+    caller.logger.warn('dsh-tui: tuiStatus.setSegment rejected an unknown placement')
+    return undefined
+  }
+  const raw = segment as unknown as Record<string, unknown>
+  let normalized: string
+  try {
+    normalized = String(raw.key ?? '').trim().toLowerCase()
+  } catch {
+    caller.logger.warn('dsh-tui: tuiStatus.setSegment rejected an uncoercible key')
+    return undefined
+  }
+  if (!KEY_PATTERN.test(normalized)) {
+    caller.logger.warn('dsh-tui: tuiStatus.setSegment rejected an invalid key')
+    return undefined
+  }
+  // Scalar-only, same contract as set(): a non-scalar must be refused
+  // rather than silently rendering "[object Object]".
+  if (typeof raw.text !== 'string' && typeof raw.text !== 'number' && typeof raw.text !== 'boolean') {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected non-scalar text for "${normalized}"`)
+    return undefined
+  }
+  const text = cleanScalarText(raw.text, FOOTER_SEGMENT_CELLS)
+  if (text === '') {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected empty text for "${normalized}"`)
+    return undefined
+  }
+  if (raw.color !== undefined && (typeof raw.color !== 'string' || !STATUS_COLORS.has(raw.color))) {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected an unsupported color for "${normalized}"`)
+    return undefined
+  }
+  if (raw.order !== undefined && (typeof raw.order !== 'number' || !Number.isFinite(raw.order))) {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected a non-finite order for "${normalized}"`)
+    return undefined
+  }
+  const state = statusStateFor(runtime)
+  const store = state.store
+  // One key, one surface: a key already carrying text or a rich view must
+  // not also become a footer segment.
+  if (store.ownerOf(normalized) !== undefined || store.viewOwnerOf(normalized) !== undefined) {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected "${normalized}" — the key is already registered`)
+    caller.get('tuiEffectLedger')?.record(
+      {
+        operation: 'bind',
+        resource: { kind: 'status', id: normalized },
+        result: 'failed',
+        errorCode: 'DUPLICATE_CONTRIBUTION_ID',
+      },
+      identity,
+    )
+    return undefined
+  }
+  const existingOwner = store.segmentOwnerOf(normalized)
+  if (existingOwner !== undefined && existingOwner !== owner) {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected "${normalized}" — the segment belongs to another activation`)
+    return undefined
+  }
+  const had = existingOwner !== undefined
+  // Budgets are computed excluding this key so a replace is never charged
+  // twice for the segment it is replacing.
+  if (store.segmentCount(normalized) >= MAX_FOOTER_SEGMENTS) {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected "${normalized}": ${MAX_FOOTER_SEGMENTS} footer segments already shown`)
+    return undefined
+  }
+  if (store.segmentCells(normalized) + stringWidth(text) > FOOTER_SEGMENT_BUDGET) {
+    caller.logger.warn(`dsh-tui: tuiStatus.setSegment rejected "${normalized}": footer segments are limited to ${FOOTER_SEGMENT_BUDGET} cells`)
+    return undefined
+  }
+  const detail = raw.detail === undefined ? undefined : cleanScalarText(raw.detail, FOOTER_DETAIL_CELLS)
+  const tooltip = raw.tooltip === undefined ? undefined : cleanScalarText(raw.tooltip, FOOTER_DETAIL_CELLS)
+  const token = state.nextToken++
+  store.addSegment(
+    Object.freeze({
+      key: normalized,
+      placement,
+      text,
+      color: raw.color as TuiStatusColor | undefined,
+      dim: raw.dim === true,
+      order: typeof raw.order === 'number' ? raw.order : 0,
+      detail: detail === '' ? undefined : detail,
+      tooltip: tooltip === '' ? undefined : tooltip,
+      registrationId: token,
+    }),
+    token,
+    owner,
+  )
+  let disposed = false
+  let ledgerApplied = false
+  let ownerCleanup: (() => unknown) | undefined
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    if (store.clearSegmentIf(normalized, token, owner) && ledgerApplied) {
+      caller.get('tuiEffectLedger')?.record(
+        { operation: 'release', resource: { kind: 'status', id: normalized }, result: 'applied' },
+        identity,
+      )
+    }
+    const cleanup = ownerCleanup
+    ownerCleanup = undefined
+    cleanup?.()
+  }
+  const bound = bindCallerEffect(caller, dispose, cleanup => {
+    ownerCleanup = cleanup
+  })
+  if (!bound) return undefined
+  caller.get('tuiEffectLedger')?.record(
+    {
+      operation: had ? 'replace' : 'bind',
+      resource: { kind: 'status', id: normalized },
+      result: 'applied',
+      ...(had ? { replaces: { resourceId: normalized } } : {}),
+    },
+    identity,
+  )
+  ledgerApplied = true
+  return dispose
 }
 
 /** Host-only status store accessor; not part of the package export map. */

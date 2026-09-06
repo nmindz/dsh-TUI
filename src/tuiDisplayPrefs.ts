@@ -135,7 +135,13 @@ const SCROLL_GUTTERS = new Set<ScrollGutterMode>(['timeline', 'scrollbar', 'hidd
 /** Every field switch; `layout` is the one non-boolean member. */
 type StatusBarBooleanKey = Exclude<keyof StatusBarConfig, 'layout'>
 const STATUS_BAR_KEYS = Object.keys(DEFAULT_STATUS_BAR) as StatusBarBooleanKey[]
-const FOOTER_FIELD_ID_SET: ReadonlySet<string> = new Set(FOOTER_FIELD_IDS)
+// Field ids are matched case-insensitively and canonicalized back to their
+// declared spelling: `sessionId` must survive a layout written as
+// `sessionid`, which the lowercase-normalizing token pass would otherwise
+// turn into an unresolvable token.
+const FOOTER_FIELD_BY_LOWER: ReadonlyMap<string, string> = new Map(
+  FOOTER_FIELD_IDS.map(id => [id.toLowerCase(), id as string]),
+)
 
 /** Mirrors the plugin status key rule (`plugin` / `plugin:sub-item`). */
 const FOOTER_SEGMENT_KEY_PATTERN = /^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)*$/u
@@ -144,10 +150,16 @@ const FOOTER_SEGMENT_KEY_PATTERN = /^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)*$/u
  *  or a plugin segment key). Shape only — plugin keys register at runtime,
  *  so existence is never asserted here. */
 export function isFooterLayoutToken(token: string): boolean {
-  return FOOTER_FIELD_ID_SET.has(token)
+  return FOOTER_FIELD_BY_LOWER.has(token.toLowerCase())
     || token === FOOTER_LAYOUT_SPACER
     || token === FOOTER_LAYOUT_WILDCARD
     || FOOTER_SEGMENT_KEY_PATTERN.test(token)
+}
+
+/** Canonical spelling for a field id written in any case; other tokens
+ *  (plugin keys, spacer, wildcard) pass through unchanged. */
+export function canonicalFooterToken(token: string): string {
+  return FOOTER_FIELD_BY_LOWER.get(token.toLowerCase()) ?? token
 }
 
 /** Normalize untrusted/config-layer values without mutating the input. */
@@ -178,7 +190,7 @@ export function normalizeFooterLayout(value: unknown): FooterLayout | undefined 
   let wildcard = false
   for (const raw of value) {
     if (typeof raw !== 'string') continue
-    const token = raw.trim().toLowerCase()
+    const token = canonicalFooterToken(raw.trim().toLowerCase())
     if (token === '' || out.includes(token)) continue
     if (token === FOOTER_LAYOUT_SPACER) {
       if (spacer) continue

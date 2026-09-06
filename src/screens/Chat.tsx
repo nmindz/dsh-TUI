@@ -379,6 +379,12 @@ export function Chat({
     subscribeStatus,
     () => statusContributions.getViewSnapshot(),
   )
+  // Footer segments ride the same store; StatusLine merges them into its
+  // field groups (or resolves them by key when a layout is set).
+  const statusSegments = React.useSyncExternalStore(
+    subscribeStatus,
+    () => statusContributions.getSegmentSnapshot(),
+  )
   // Shortcut handler failures surface as toasts (the registry also logs
   // them); the hook is re-pointed on every mount so a stale closure never
   // outlives its channel.
@@ -3979,6 +3985,7 @@ export function Chat({
         />
         <StatusLine
           channel={channel}
+          segments={statusSegments}
           selectionActive={selectionActive}
           helpOpen={helpOpen}
           wake={

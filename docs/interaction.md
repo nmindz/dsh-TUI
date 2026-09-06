@@ -48,6 +48,8 @@ transcript 模式中打开会话全文搜索。全文搜索使用 `n`/`N` 在结
 被拒绝时返回 `undefined`；注册成功时返回的 disposer 会同时撤下视图和对应的
 Cordis effect。
 
+插件还可以经 `tuiStatus.setSegment` 向**底部状态栏**贡献纯文本段：`{ key, text, color?, dim?, order?, detail?, tooltip? }`，placement 取 `footer-left` 或 `footer-right`（默认前者）。段是结构化文本而非 React——页脚的宽度稳定性与截断契约归宿主所有，插件只提供内容，宿主负责渲染单元格；`color` 限定在主题令牌白名单内（拒绝裸 hex/ANSI，保证换主题后依然可读），文本按终端单元格截断（单段 40 cell），整个界面受 4 段 / 60 cell 的总预算限制。key 与 `set`/`registerView` 共享同一命名空间，一个 key 只能占一个界面。`detail` 在悬停时填充补充行，`tooltip` 在文本被截断时弹出。段默认追加在同组内建字段之后，因此新增一段不会打乱存量顺序；`/settings → 显示插件状态段` 可整体关闭，minimal 模式下一律不显示。老宿主上用 `typeof status?.setSegment === 'function'` 特性检测即可优雅退回提示框上方的那一行。
+
 ## 输入编辑
 
 | 按键 | 行为 |

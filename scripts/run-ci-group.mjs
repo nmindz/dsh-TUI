@@ -240,6 +240,10 @@ const GROUPS = {
 // 折叠、goal chip、working/selection 提示、上下文条与 wake。底部状态栏的
 // 主回归套件——改 StatusLine 字段或顺序必须先过这一关。
     ["verify-display-settings", ['node', '--import', 'tsx/esm', 'scripts/verify-display-settings.tsx']],
+// 页脚布局与插件段回归：layout 归一化（大小写规范化、去重、单一分隔符/
+// 通配符、上限）、L1 追加不扰动存量顺序、L2 成员资格压过字段开关、`|`
+// 分组在 compact 下仍生效、minimal 丢弃插件段并忽略 layout、jobs 不可寻址。
+    ["verify-status-footer", ['node', '--import', 'tsx/esm', 'scripts/verify-status-footer.tsx']],
 // 非 TTY 宿主门禁回归（Web/Tauri 共存）：profile 装有 dsh-tui 的非终端
 // 宿主（stdout 为 pipe/null）必须静默跳过插件、不 throw、不影响宿主启动；
 // 显式 dsh-tui launcher/standalone 启动无 TTY 仍保留原报错。
