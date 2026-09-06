@@ -73,6 +73,57 @@ This switch is read at startup. Use `/restart` after changing it to automaticall
 TUI and resume the current session; `/reload` does not apply it. If a turn is running, wait for
 it to finish or stop it with `Ctrl+C` before restarting.
 
+### `statusBar`: the status footer
+
+`config.statusBar` is a switch object controlling the footer field by field. `/settings → Status bar` edits the same keys, and the user layer wins.
+
+```yaml
+- id: dsh-tui
+  config:
+    statusBar:
+      compact: true
+      model: true
+      cwd: true
+      contextUsage: true
+      cost: true
+      goal: true
+      gitBranch: true
+      pluginSegments: true
+      layout: [model, ctx, '|', my-plugin:tf, git, cwd]
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `compact` | `true` | Compact presentation: cwd basename only, percent-first ctx, and the two groups folded into one row (with `layout` set this degrades to abbreviation only) |
+| `model` | `true` | Live model id |
+| `thinking` | `true` | Reasoning effort / thinking mode |
+| `cwd` | `true` | Session working directory |
+| `contextUsage` | `true` | Context-window consumption |
+| `cache` | `true` | Prompt-cache hit rate |
+| `tokens` | `false` | Running input/output token totals |
+| `cost` | `true` | Estimated session spend (≈¥; only for official DeepSeek providers whose model has a known price) |
+| `tps` | `false` | Live and recent output speed |
+| `gitBranch` | `false` | Current git branch |
+| `sessionTitle` | `false` | Session title |
+| `sessionId` | `false` | Short session id (`#` + first 8 chars, matching the session log filename) |
+| `goal` | `true` | Compact goal chip while a goal exists |
+| `mode` | `false` | Non-default session mode |
+| `contextBar` | `false` | Segmented context progress bar on its own row |
+| `activity` | `false` | Idle working-activity summary |
+| `trajectory` | `false` | Mini trajectory wake at the footer's right edge |
+| `shortcutHint` | `false` | Idle `? for shortcuts` reminder |
+| `pluginSegments` | `true` | Render footer segments contributed by plugins through `tuiStatus.setSegment` |
+| `layout` | unset | Explicit footer arrangement; see below |
+
+`layout` is a flat token list for rearranging, hiding, or mixing the footer. **Once set it overrides every field switch above**: only listed slots render, in listed order.
+
+- Built-in field names: `model`, `tps`, `thinking`, `mode`, `cache`, `tokens`, `cost`, `ctx`, `goal`, `git`, `cwd`, `title`, `sessionId` (matched case-insensitively), plus the key of any plugin segment.
+- `|` splits the groups: tokens before it go left, tokens after it are right-aligned. Without a `|`, everything goes left.
+- `*` expands every plugin segment the layout never named — that is what keeps a plugin installed after the layout was written from being invisible.
+- Unresolvable tokens (a typo, or a plugin that never registered) are skipped rather than fatal; the startup log names them.
+- A layout always renders through the two-group row, so `|` can never be a no-op. Minimal mode ignores `layout` and drops every plugin segment.
+- The `jobs` background-job chip is not addressable: it is transient session state rather than chrome, so no layout may hide it.
+
 ## Diagnostic environment variables
 
 The following variables are for diagnostics or experimental terminal integration. They are all
