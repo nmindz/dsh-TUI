@@ -107,7 +107,7 @@ Profile 启动按顺序叠加 `dsh-base`、已安装 bundle、`@deepseek-harness
 | `activity` | `false` | 空闲时的工作摘要行 |
 | `trajectory` | `false` | 页脚右端的迷你轨迹条 |
 | `shortcutHint` | `false` | 空闲时的 `? 查看快捷键` 提示 |
-| `pluginSegments` | `true` | 渲染插件经 `tuiStatus.setSegment` 贡献的页脚状态段 |
+| `pluginSegments` | `true` | 渲染插件经 `tuiStatus.setSegment` 贡献的页脚状态段；同时控制插件经 `tuiStatus.decorateField` 给内建字段加的图标 |
 | `layout` | 未设置 | 显式页脚排布；见下 |
 
 `layout` 是一个扁平 token 列表，用于完全重排、隐藏或混排页脚。**一旦设置即压过上面所有字段开关**：只有列出的槽位渲染，且按列出顺序排列。
