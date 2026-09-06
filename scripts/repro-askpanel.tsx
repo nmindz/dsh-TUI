@@ -7,6 +7,12 @@
  * output is captured raw and ANSI-stripped (no xterm dependency).
  */
 process.env.FORCE_COLOR = '3'
+// Assertions below check Chinese notice text, so pin the language before the
+// i18n module evaluates. Without this the script inherits the developer's own
+// `/lang` choice from ~/.dsh-tui/lang.json: anyone who switched to English got
+// four failures for missing strings that were simply rendered in English.
+// `??=` keeps an explicit DSH_TUI_LANG override working.
+process.env.DSH_TUI_LANG ??= 'zh'
 
 const [{ PassThrough, Writable }, React, { Terminal: XTerm }, { render }, { AskUserQuestionPanel }, { settle, settled, sleep, viewportLines }] = await Promise.all([
   import('node:stream'),
