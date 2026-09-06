@@ -441,6 +441,28 @@ await checkAsync('an unmatched value falls back to the static prefix', async () 
   assert.ok(screen.includes('S> low'), screen)
 })
 
+await checkAsync('a decoration keeps its trailing space', async () => {
+  // The separator between an icon and its field is the icon's own trailing
+  // space. Sanitizing decorations with the trimming scalar cleaner glued
+  // every icon to its field ("🧠claude-opus-5").
+  const screen = await renderFooter({}, [], 140, [decoration('model', { prefix: 'IC ' })])
+  assert.ok(screen.includes('IC footer-model-probe'), screen)
+  assert.ok(!screen.includes('ICfooter-model-probe'), screen)
+})
+
+await checkAsync('a value-keyed icon keeps its trailing space too', async () => {
+  const screen = await renderFooter(
+    { reasoningEffort: 'max' }, [], 140,
+    [decoration('thinking', { prefixByValue: { max: 'MX ' } })],
+  )
+  assert.ok(screen.includes('MX max'), screen)
+})
+
+await checkAsync('a whitespace-only decoration is refused, not rendered', async () => {
+  const screen = await renderFooter({}, [], 140, [decoration('model', { prefix: '   ' })])
+  assert.ok(screen.includes('footer-model-probe'), screen)
+})
+
 await checkAsync('decorating does not disturb the stock field order', async () => {
   const stock = await renderFooter()
   const decorated = await renderFooter({}, [], 140, [decoration('cache', { prefix: 'C' })])
