@@ -253,6 +253,10 @@ const GROUPS = {
 //    与粘性报错、真 Chat 驱动的对话框/状态行/快捷键端到端。
     ["verify-extension-events", ['node', '--import', 'tsx/esm', 'scripts/verify-extension-events.tsx']],
     ["verify-extension-ui", ['node', '--import', 'tsx/esm', 'scripts/verify-extension-ui.tsx']],
+// 显示偏好回归：statusBar 字段开关、compact/full 两种页脚布局、cwd 波浪号
+// 折叠、goal chip、working/selection 提示、上下文条与 wake。底部状态栏的
+// 主回归套件——改 StatusLine 字段或顺序必须先过这一关。
+    ["verify-display-settings", ['node', '--import', 'tsx/esm', 'scripts/verify-display-settings.tsx']],
 // 非 TTY 宿主门禁回归（Web/Tauri 共存）：profile 装有 dsh-tui 的非终端
 // 宿主（stdout 为 pipe/null）必须静默跳过插件、不 throw、不影响宿主启动；
 // 显式 dsh-tui launcher/standalone 启动无 TTY 仍保留原报错。

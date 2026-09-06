@@ -121,8 +121,10 @@ export interface Config {
    *  a ~30fps reveal instead of jumping per provider burst — bursty or
    *  one-shot deliveries read as an even flow. On by default. */
   smoothStreaming?: boolean
-  /** Status-footer field visibility and compact presentation preferences. */
-  statusBar?: Partial<StatusBarConfig>
+  /** Status-footer field visibility and compact presentation preferences.
+   *  `layout` widens to a mutable array: cordis schemas type arrays mutable,
+   *  and the runtime freezes its own normalized copy. */
+  statusBar?: Partial<Omit<StatusBarConfig, 'layout'>> & { layout?: string[] }
   /** Built-in action-shortcut overrides (`paste: 'alt+v'`), keyed by action
    *  id (see the keymap utility). Combos are `ctrl+`/`alt+`/`shift+` plus a
    *  key; several combos may be comma-separated. Unset actions keep their
@@ -177,6 +179,7 @@ export const Config: Schema<Config> = Schema.object({
     contextUsage: Schema.boolean().default(DEFAULT_STATUS_BAR.contextUsage),
     cache: Schema.boolean().default(DEFAULT_STATUS_BAR.cache),
     tokens: Schema.boolean().default(DEFAULT_STATUS_BAR.tokens),
+    cost: Schema.boolean().default(DEFAULT_STATUS_BAR.cost),
     tps: Schema.boolean().default(DEFAULT_STATUS_BAR.tps),
     gitBranch: Schema.boolean().default(DEFAULT_STATUS_BAR.gitBranch),
     sessionTitle: Schema.boolean().default(DEFAULT_STATUS_BAR.sessionTitle),
@@ -187,7 +190,11 @@ export const Config: Schema<Config> = Schema.object({
     activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
     trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
     shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
-  }).default({ ...DEFAULT_STATUS_BAR }),
+    pluginSegments: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginSegments),
+    // Explicit footer arrangement. Set, it overrides every field switch
+    // above; `|` splits the left group from the right-aligned one.
+    layout: Schema.array(Schema.string()).default([]),
+  }).default({ ...DEFAULT_STATUS_BAR, layout: [] }),
   // One optional combo string per customizable action (no defaults: unset
   // keeps the built-in binding; see Config.shortcuts).
   shortcuts: Schema.object(

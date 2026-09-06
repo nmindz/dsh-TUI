@@ -96,7 +96,7 @@ import { getLang, LANGS, t, tOr, type Lang } from '../i18n.js'
 import { AUTO_THEME_NAME } from '../theme.js'
 import { listThemeCatalog } from '../themeCatalog.js'
 import { canonicalPresetFor, DEFAULT_SESSION_MODES, modeDisplayName, permissionCycleEntry, RESERVED_PERMISSION_PRESETS, resolveSessionModes, stablePermissionRosterOrder, type SessionModeSpec } from '../sessionModes.js'
-import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, sameFooterLayout, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import { SubagentActivityStore, type SubagentState } from './subagents.js'
 export type { SubagentState } from './subagents.js'
 import { BackgroundJobStore, formatJobDuration, type BackgroundJobState, type BackgroundJobStatus, type JobsRuntime } from './jobs.js'
@@ -6489,9 +6489,12 @@ export function createChannel(
     },
     setStatusBar(config) {
       const next = normalizeStatusBar({ ...state.statusBar, ...config })
+      // Every field but `layout` is a boolean; `layout` normalizes to a
+      // fresh array each call and needs a content comparison.
       const changed = Object.keys(next).some(key =>
-        next[key as keyof StatusBarConfig] !== state.statusBar[key as keyof StatusBarConfig],
-      )
+        key !== 'layout'
+        && next[key as keyof StatusBarConfig] !== state.statusBar[key as keyof StatusBarConfig],
+      ) || !sameFooterLayout(next.layout, state.statusBar.layout)
       if (!changed) return
       state.statusBar = next
       state.emit()

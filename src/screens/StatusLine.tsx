@@ -3,7 +3,7 @@ import { Box, Text, useTerminalSize, useTheme } from '../ui.js'
 import type { Color } from '../ink/styles.js'
 import { formatTokens } from '../terminal-utils/format.js'
 import { t } from '../i18n.js'
-import { formatContextUsage, DEFAULT_STATUS_BAR, normalizeStatusBar, type StatusBarConfig } from '../tuiDisplayPrefs.js'
+import { formatContextUsage, DEFAULT_STATUS_BAR, normalizeStatusBar, type FooterFieldId, type StatusBarConfig } from '../tuiDisplayPrefs.js'
 import { estimateSessionCostCny, estimateSessionCostSplitCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { ActivityLine, contextPressurePct } from '../components/ActivityLine.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
@@ -73,6 +73,42 @@ type FieldPart = {
    *  tooltip with the full string (e.g. the session title, cut mid-word
    *  when the right-aligned group runs out of columns). */
   tooltip?: string
+}
+
+/**
+ * Every ordered footer slot. `jobs` rides along for ordering but is NOT a
+ * {@link FooterFieldId}: the background-job chip is transient session state,
+ * so neither a preference nor a layout may hide it.
+ */
+type FooterSlotId = FooterFieldId | 'jobs'
+
+/** Stock order, read straight off the pre-registry field literals. */
+const STOCK_LEFT: readonly FooterSlotId[] =
+  ['model', 'tps', 'jobs', 'thinking', 'mode', 'cache', 'tokens', 'cost']
+const STOCK_RIGHT: readonly FooterSlotId[] =
+  ['goal', 'git', 'cwd', 'title', 'sessionId']
+
+/** Slot → the preference that gates it. Slots absent here are always on. */
+const BOOL_OF: Readonly<Partial<Record<FooterSlotId, keyof StatusBarConfig>>> = {
+  model: 'model',
+  tps: 'tps',
+  thinking: 'thinking',
+  mode: 'mode',
+  cache: 'cache',
+  tokens: 'tokens',
+  cost: 'cost',
+  ctx: 'contextUsage',
+  goal: 'goal',
+  git: 'gitBranch',
+  cwd: 'cwd',
+  title: 'sessionTitle',
+  sessionId: 'sessionId',
+}
+
+/** A slot renders when its preference is on (or it has none). */
+function slotEnabled(statusBar: StatusBarConfig, id: FooterSlotId): boolean {
+  const key = BOOL_OF[id]
+  return key === undefined || statusBar[key] === true
 }
 
 /**
@@ -162,10 +198,13 @@ export function StatusLine({
   const contextUsed = usage === undefined
     ? undefined
     : usage.input + usage.cacheRead + usage.cacheWrite
-  const contextParts: FieldPart[] = []
+  // Availability registry: a slot lands here when its DATA exists. Boolean
+  // gating and ordering are applied at selection, so `statusBar.layout` can
+  // address the same slots without duplicating any of these expressions.
+  const available = new Map<FooterSlotId, FieldPart>()
 
-  if (statusBar.thinking && channel.reasoningEffort !== undefined) {
-    contextParts.push({
+  if (channel.reasoningEffort !== undefined) {
+    available.set('thinking', {
       key: 'effort',
       node: <Text color="inactiveShimmer">{channel.reasoningEffort}</Text>,
     })
@@ -173,8 +212,8 @@ export function StatusLine({
   const modeNeedsExplicitMarker = channel.mode.plan === true
     || channel.mode.sandbox === 'danger-full-access'
     || channel.mode.approval === 'never'
-  if (statusBar.mode && (channel.modeIndex > 0 || modeNeedsExplicitMarker)) {
-    contextParts.push({
+  if (channel.modeIndex > 0 || modeNeedsExplicitMarker) {
+    available.set('mode', {
       key: 'mode',
       node: (
         <Text
@@ -186,9 +225,9 @@ export function StatusLine({
     })
   }
 
-  const formattedContext = statusBar.contextUsage
-    ? formatContextUsage(contextUsed, channel.contextWindow, statusBar.compact)
-    : undefined
+  // Computed ungated so `ctx` can be a layout-addressable slot; the
+  // `contextUsage` preference is applied at selection like every other slot.
+  const formattedContext = formatContextUsage(contextUsed, channel.contextWindow, statusBar.compact)
   // The ctx field's two faces: the idle readout, and the hover state — an
   // in-place pressure bar (the user-liked "text becomes a bar" morph).
   //
@@ -229,23 +268,24 @@ export function StatusLine({
           <Text dimColor>ctx </Text>{formattedContext}
         </Text>
       )
-  if (statusBar.cache) {
-    const cacheRate = formatCacheHitRate(usage)
-    if (cacheRate !== undefined) {
-      contextParts.push({
-        key: 'cache',
-        id: 'cache',
-        node: (
-          <Text color="inactiveShimmer">
-            <Text dimColor>{t('status-cache-label')}</Text>{cacheRate}
-          </Text>
-        ),
-      })
-    }
+  if (ctxNode !== undefined) {
+    available.set('ctx', { key: 'context', id: 'ctx', node: ctxNode })
+  }
+  const cacheRate = formatCacheHitRate(usage)
+  if (cacheRate !== undefined) {
+    available.set('cache', {
+      key: 'cache',
+      id: 'cache',
+      node: (
+        <Text color="inactiveShimmer">
+          <Text dimColor>{t('status-cache-label')}</Text>{cacheRate}
+        </Text>
+      ),
+    })
   }
 
   let tpsPart: FieldPart | undefined
-  if (statusBar.tps && channel.tps !== undefined) {
+  if (channel.tps !== undefined) {
     if (channel.working && channel.tpsSamples.length === 0) {
       tpsPart = {
         key: 'tps',
@@ -289,108 +329,106 @@ export function StatusLine({
   const liveJobs = (channel.backgroundJobs ?? NO_BACKGROUND_JOBS).filter(
     job => job.status === 'running' || job.status === 'stopping',
   )
-  const jobsPart: FieldPart | undefined = liveJobs.length === 0
-    ? undefined
-    : {
-        key: 'jobs',
-        id: 'jobs',
+  if (liveJobs.length > 0) {
+    available.set('jobs', {
+      key: 'jobs',
+      id: 'jobs',
+      node: (
+        <Text color="toolDotTask">
+          {'● '}{liveJobs.length}
+        </Text>
+      ),
+    })
+  }
+  if (tpsPart !== undefined) available.set('tps', tpsPart)
+
+  available.set('model', {
+    key: 'model',
+    id: 'model',
+    node: <Text color="inactiveShimmer">{channel.model}</Text>,
+  })
+  available.set('tokens', {
+    key: 'tokens',
+    id: 'tokens',
+    node: (
+      <Text color="inactiveShimmer">
+        {formatTokens(channel.tokens.input)}→{formatTokens(channel.tokens.output)}
+      </Text>
+    ),
+  })
+  // Estimated session spend (≈¥): only for official DeepSeek providers
+  // whose model has a known price, and only once the estimate is non-zero
+  // (a fresh session showing ¥0.00 is noise). The trailing 峰/谷 marker
+  // shows the current billing window. Hover shows the breakdown.
+  if (isDeepSeekOfficialProvider(channel.provider)) {
+    const estimate = estimateSessionCostCny(channel.tokens, channel.model)
+    if (estimate !== undefined && estimate > 0) {
+      available.set('cost', {
+        key: 'cost',
+        id: 'cost',
         node: (
-          <Text color="toolDotTask">
-            {'● '}{liveJobs.length}
+          <Text color="inactiveShimmer">
+            {t('status-cost-label')}¥{estimate.toFixed(2)} {t(isPeakHour() ? 'cost-now-peak' : 'cost-now-idle')}
           </Text>
         ),
-      }
+      })
+    }
+  }
 
-  const leftFields: FieldPart[] = [
-    ...(statusBar.model
-      ? [{ key: 'model', id: 'model' as const, node: <Text color="inactiveShimmer">{channel.model}</Text> }]
-      : []),
-    ...(tpsPart !== undefined ? [tpsPart] : []),
-    ...(jobsPart !== undefined ? [jobsPart] : []),
-    ...contextParts,
-    ...(statusBar.tokens
-      ? [{
-          key: 'tokens',
-          id: 'tokens' as const,
-          node: (
-            <Text color="inactiveShimmer">
-              {formatTokens(channel.tokens.input)}→{formatTokens(channel.tokens.output)}
-            </Text>
-          ),
-        }]
-      : []),
-    // Estimated session spend (≈¥): only for official DeepSeek providers
-    // whose model has a known price, and only once the estimate is non-zero
-    // (a fresh session showing ¥0.00 is noise). The trailing 峰/谷 marker
-    // shows the current billing window. Hover shows the breakdown.
-    ...(statusBar.cost && isDeepSeekOfficialProvider(channel.provider)
-      ? (() => {
-        const estimate = estimateSessionCostCny(channel.tokens, channel.model)
-        return estimate === undefined || estimate <= 0
-          ? []
-          : [{
-              key: 'cost',
-              id: 'cost' as const,
-              node: (
-                <Text color="inactiveShimmer">
-                  {t('status-cost-label')}¥{estimate.toFixed(2)} {t(isPeakHour() ? 'cost-now-peak' : 'cost-now-idle')}
-                </Text>
-              ),
-            }]
-      })()
-      : []),
-  ]
+  // Goal chip first: session-level state outranks repo/location details.
+  if (channel.goal !== undefined) {
+    available.set('goal', {
+      key: 'goal',
+      id: 'goal',
+      node: <GoalStatusChip goal={channel.goal} minimal={channel.minimal} />,
+    })
+  }
+  if (channel.gitBranch) {
+    available.set('git', {
+      key: 'git',
+      id: 'git',
+      node: <Text color="professionalBlue">{channel.gitBranch}</Text>,
+    })
+  }
+  available.set('cwd', {
+    key: 'cwd',
+    id: 'cwd',
+    node: (
+      <Text color="inactiveShimmer">
+        {statusBar.compact ? basename(displayCwd) : displayCwd}
+      </Text>
+    ),
+  })
+  if (channel.sessionTitle) {
+    available.set('title', {
+      key: 'title',
+      id: 'title',
+      // The title truncates mid-word when the right-aligned group
+      // overflows; the tooltip carries the full string.
+      tooltip: channel.sessionTitle,
+      node: <Text dimColor>{channel.sessionTitle}</Text>,
+    })
+  }
+  // Short id last: a provenance tag trails the content it identifies, and
+  // the 8-char form is what the session log filename starts with, so a
+  // truncated rendering still names the right log for --resume.
+  if (channel.agentId) {
+    available.set('sessionId', {
+      key: 'sessionId',
+      id: 'sessionId',
+      node: <Text dimColor>{`#${channel.agentId.slice(0, 8)}`}</Text>,
+    })
+  }
 
-  const rightFields: FieldPart[] = [
-    // Goal chip first: session-level state outranks repo/location details.
-    ...(statusBar.goal && channel.goal !== undefined
-      ? [{
-          key: 'goal',
-          id: 'goal' as const,
-          node: <GoalStatusChip goal={channel.goal} minimal={channel.minimal} />,
-        }]
-      : []),
-    ...(statusBar.gitBranch && channel.gitBranch
-      ? [
-          {
-            key: 'git',
-            id: 'git' as const,
-            node: <Text color="professionalBlue">{channel.gitBranch}</Text>,
-          },
-        ]
-      : []),
-    ...(statusBar.cwd
-      ? [{
-          key: 'cwd',
-          id: 'cwd' as const,
-          node: (
-            <Text color="inactiveShimmer">
-              {statusBar.compact ? basename(displayCwd) : displayCwd}
-            </Text>
-          ),
-        }]
-      : []),
-    ...(statusBar.sessionTitle && channel.sessionTitle
-      ? [{
-          key: 'title',
-          id: 'title' as const,
-          // The title truncates mid-word when the right-aligned group
-          // overflows; the tooltip carries the full string.
-          tooltip: channel.sessionTitle,
-          node: <Text dimColor>{channel.sessionTitle}</Text>,
-        }]
-      : []),
-    // Short id last: a provenance tag trails the content it identifies, and
-    // the 8-char form is what the session log filename starts with, so a
-    // truncated rendering still names the right log for --resume.
-    ...(statusBar.sessionId && channel.agentId
-      ? [{
-          key: 'sessionId',
-          id: 'sessionId' as const,
-          node: <Text dimColor>{`#${channel.agentId.slice(0, 8)}`}</Text>,
-        }]
-      : []),
-  ]
+  // Stock selection: preference-gated, stock order. `ctx` stays out of the
+  // left group here — the render below still owns its compact/full placement.
+  const pickSlots = (ids: readonly FooterSlotId[]): FieldPart[] =>
+    ids
+      .filter(id => slotEnabled(statusBar, id) && available.has(id))
+      .map(id => available.get(id)!)
+  const leftFields: FieldPart[] = pickSlots(STOCK_LEFT)
+  const rightFields: FieldPart[] = pickSlots(STOCK_RIGHT)
+  const ctxRender = statusBar.contextUsage ? available.get('ctx')?.node : undefined
 
   const hint = selectionActive
     ? t('statusline-hint-select')
@@ -432,9 +470,9 @@ export function StatusLine({
   const compactFields = [...leftFields, ...rightFields]
   const fullLeftFields = [
     ...leftFields,
-    ...(ctxNode !== undefined ? [{ key: 'context', id: 'ctx' as const, node: ctxNode }] : []),
+    ...(ctxRender !== undefined ? [{ key: 'context', id: 'ctx' as const, node: ctxRender }] : []),
   ]
-  const hasStatusFields = compactFields.length > 0 || ctxNode !== undefined
+  const hasStatusFields = compactFields.length > 0 || ctxRender !== undefined
   // The supplemental row is PERMANENTLY mounted (height pinned to 1)
   // whenever the footer carries hoverable chrome — mounting it from nothing
   // on hover is what made the footer grow mid-gesture and shoved the
@@ -485,9 +523,9 @@ export function StatusLine({
             <Box flexGrow={1} flexShrink={1} flexDirection="row" overflow="hidden">
               <FieldLine parts={compactFields} hoverProps={hoverProps} />
             </Box>
-            {ctxNode !== undefined ? (
+            {ctxRender !== undefined ? (
               <Box flexShrink={0} {...hoverProps('ctx')}>
-                <Text wrap="truncate">{ctxNode}</Text>
+                <Text wrap="truncate">{ctxRender}</Text>
               </Box>
             ) : null}
           </Box>
