@@ -68,6 +68,57 @@ Profile 启动按顺序叠加 `dsh-base`、已安装 bundle、`@deepseek-harness
 这个开关在启动时读取。修改后使用 `/restart` 自动重新启动 TUI 并恢复当前会话；
 `/reload` 不应用此开关。回合运行中需先等待结束或用 `Ctrl+C` 停止，再重启。
 
+### `statusBar`：底部状态栏
+
+`config.statusBar` 是一个开关对象，逐字段控制页脚显示；`/settings → 状态栏` 编辑同一组键，用户层优先。
+
+```yaml
+- id: dsh-tui
+  config:
+    statusBar:
+      compact: true
+      model: true
+      cwd: true
+      contextUsage: true
+      cost: true
+      goal: true
+      gitBranch: true
+      pluginSegments: true
+      layout: [model, ctx, '|', my-plugin:tf, git, cwd]
+```
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `compact` | `true` | 紧凑呈现：cwd 只显示末段、ctx 百分比在前；左右两组合并为一行（`layout` 设置后退化为纯缩写开关） |
+| `model` | `true` | 当前模型标识 |
+| `thinking` | `true` | 推理强度／思考模式 |
+| `cwd` | `true` | 会话工作目录 |
+| `contextUsage` | `true` | 上下文窗口占用 |
+| `cache` | `true` | 提示缓存命中率 |
+| `tokens` | `false` | 输入／输出 token 累计 |
+| `cost` | `true` | 会话花费估算（≈¥，仅 DeepSeek 官方 provider 且模型有已知价格时显示） |
+| `tps` | `false` | 实时与近期输出速度 |
+| `gitBranch` | `false` | 当前 git 分支 |
+| `sessionTitle` | `false` | 会话标题 |
+| `sessionId` | `false` | 短会话 id（`#` + 前 8 位，与会话日志文件名开头一致） |
+| `goal` | `true` | 目标存在时的紧凑目标 chip |
+| `mode` | `false` | 非默认会话模式 |
+| `contextBar` | `false` | 独占一行的分段上下文进度条 |
+| `activity` | `false` | 空闲时的工作摘要行 |
+| `trajectory` | `false` | 页脚右端的迷你轨迹条 |
+| `shortcutHint` | `false` | 空闲时的 `? 查看快捷键` 提示 |
+| `pluginSegments` | `true` | 渲染插件经 `tuiStatus.setSegment` 贡献的页脚状态段 |
+| `layout` | 未设置 | 显式页脚排布；见下 |
+
+`layout` 是一个扁平 token 列表，用于完全重排、隐藏或混排页脚。**一旦设置即压过上面所有字段开关**：只有列出的槽位渲染，且按列出顺序排列。
+
+- 内建字段名：`model`、`tps`、`thinking`、`mode`、`cache`、`tokens`、`cost`、`ctx`、`goal`、`git`、`cwd`、`title`、`sessionId`（大小写不敏感），另可写任意插件段的 key。
+- `|` 分隔符：之前进左组，之后右对齐；不写 `|` 则全部在左组。
+- `*` 通配符：展开所有未显式列出的插件段——布局写死之后再装的插件靠它才有位置。
+- 认不出的 token（拼错，或插件未注册）跳过而非报错，启动日志会提示。
+- 设了 `layout` 就总是左右双组渲染，`|` 因此不会变成空操作；minimal 模式忽略 `layout` 并丢弃全部插件段。
+- `jobs` 后台任务角标不可寻址：它是瞬时会话状态而非装饰，任何布局都不能隐藏它。
+
 ## 工作状态行
 
 `dsh-working-activity` 随包安装，并由本包 patch 插入。只需要按 ID 覆盖参数：
