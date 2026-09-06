@@ -96,6 +96,7 @@ import { getLang, LANGS, t, tOr, type Lang } from '../i18n.js'
 import { AUTO_THEME_NAME } from '../theme.js'
 import { listThemeCatalog } from '../themeCatalog.js'
 import { canonicalPresetFor, DEFAULT_SESSION_MODES, modeDisplayName, permissionCycleEntry, RESERVED_PERMISSION_PRESETS, resolveSessionModes, stablePermissionRosterOrder, type SessionModeSpec } from '../sessionModes.js'
+import type { ModelProviderInfo } from './types.js'
 import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, sameFooterLayout, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import { SubagentActivityStore, type SubagentState } from './subagents.js'
 export type { SubagentState } from './subagents.js'
@@ -1303,7 +1304,7 @@ export interface Channel {
    *  A route that lists nothing still has a `/model` group row — see listProviders. */
   listModels(): Promise<readonly LlmModelInfo[]>
   /** Provider display identities for the same routes (picker group labels). */
-  listProviders(): Promise<readonly LlmProviderInfo[]>
+  listProviders(): Promise<readonly ModelProviderInfo[]>
   /** Drop the `/model <provider/id>` completion cache so the next `/model `
    *  refetch reflects a provider-catalog change (`/provider` add/edit/delete,
    *  OAuth sign-in/out) — the same consistency the picker's per-open refetch
@@ -1747,7 +1748,7 @@ export interface ChannelState {
   setActivityFrames(name: string): boolean
   listModels(): Promise<readonly LlmModelInfo[]>
   /** Provider display identities (see the public Channel type). */
-  listProviders(): Promise<readonly LlmProviderInfo[]>
+  listProviders(): Promise<readonly ModelProviderInfo[]>
   /** Drop the `/model` completion cache (see the public Channel type). */
   invalidateModelCompletion(): void
   /** The live agent's skill catalog for `/skills` (see the public Channel type). */
@@ -6670,33 +6671,36 @@ export function createChannel(
         | { listProviders(): readonly { id: string; name: string }[] }
         | undefined
       if (llm === undefined) return Promise.resolve([])
-      // The registry lists every route it can serve, which includes catalog
-      // adapter families nobody configured (openai/xai/deepseek ship
-      // mounted). Those must not become picker rows: entering one can only
-      // report "unavailable", and offering a provider the user never set up
-      // is noise. Keep the registry's order and names, but admit only
-      // routes that a profile actually declares.
+      // The registry lists every route it can serve: catalog families that
+      // ship mounted but that nobody configured (openai/xai/deepseek), and
+      // OAuth routes an auth bundle claims while signed out. Those must not
+      // become picker rows on their own — entering one can only report
+      // "unavailable", and offering a provider the user never set up is
+      // noise.
+      //
+      // TAG rather than drop: an unconfigured route that nonetheless lists
+      // models (a signed-in OAuth route) still earns its row through the
+      // model-list union in modelGroups, and keeping it here is what lets
+      // that row render its display name instead of the raw route key.
       //
       // The RESOLVED section, not the user layer: a route inherited from a
       // composition base is configured and usable even though `/provider`
-      // cannot edit it. A provider absent here but present in the catalog
-      // still gets a row — modelGroups unions the model list in.
+      // cannot edit it.
       const settings = ctx.get('settings') as
         | { get(ns: string): unknown }
         | undefined
       const section = settings?.get('llm-pi-ai') as
         | { providers?: Record<string, unknown> }
         | undefined
-      const configured = section?.providers
-      // No settings service (or no section at all): fall back to the full
-      // registry rather than blanking the picker's top level.
-      if (configured === undefined || typeof configured !== 'object' || configured === null) {
+      const declared = section?.providers
+      // No settings service (or no section at all): leave every route
+      // untagged, which downstream treats as configured — an embedded host
+      // must not end up with a blank picker.
+      if (declared === undefined || typeof declared !== 'object' || declared === null) {
         return Promise.resolve(llm.listProviders().map(info => ({ ...info })))
       }
       return Promise.resolve(
-        llm.listProviders()
-          .filter(info => Object.hasOwn(configured, info.id))
-          .map(info => ({ ...info })),
+        llm.listProviders().map(info => ({ ...info, configured: Object.hasOwn(declared, info.id) })),
       )
     },
     invalidateModelCompletion() {

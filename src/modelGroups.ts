@@ -9,7 +9,7 @@
  * @module dsh-tui/modelGroups
  */
 
-import type { LlmModelInfo, LlmProviderInfo } from './dsh-adapter/types.js'
+import type { LlmModelInfo, ModelProviderInfo } from './dsh-adapter/types.js'
 
 /**
  * The pseudo provider key of the pinned "recently used" group. Provider
@@ -51,10 +51,17 @@ export interface ModelGroupRow {
  */
 function routeOrder(
   models: readonly LlmModelInfo[],
-  providerInfos: readonly LlmProviderInfo[],
+  providerInfos: readonly ModelProviderInfo[],
 ): string[] {
   const order: string[] = []
+  const serves = new Set(models.map(model => model.provider))
   for (const info of providerInfos) {
+    // `configured === false` marks a route the registry serves but no
+    // profile declares — an unconfigured catalog family, or an OAuth route
+    // claimed while signed out. It earns a row only by actually listing
+    // models; otherwise entering it could say nothing but "unavailable".
+    // Undefined means the host does not tag, which stays configured.
+    if (info.configured === false && !serves.has(info.id)) continue
     if (!order.includes(info.id)) order.push(info.id)
   }
   for (const model of models) {
@@ -94,7 +101,7 @@ export function recentCatalogModels(
  */
 export function deriveModelGroups(
   models: readonly LlmModelInfo[],
-  providerInfos: readonly LlmProviderInfo[],
+  providerInfos: readonly ModelProviderInfo[],
   recents?: readonly ModelRef[],
 ): readonly ModelGroupRow[] {
   const counts = new Map<string, number>()
@@ -148,7 +155,7 @@ export function modelPickerLanding(
   currentProvider: string | undefined,
   currentModel: string | undefined,
   recents?: readonly ModelRef[],
-  providerInfos?: readonly LlmProviderInfo[],
+  providerInfos?: readonly ModelProviderInfo[],
 ): ModelPickerLanding {
   const providers = routeOrder(models, providerInfos ?? [])
   if (providers.length === 0) return { group: undefined, index: 0 }
