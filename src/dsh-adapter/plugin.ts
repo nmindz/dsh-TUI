@@ -636,6 +636,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           contextUsage: Schema.boolean().default(DEFAULT_STATUS_BAR.contextUsage),
           cache: Schema.boolean().default(DEFAULT_STATUS_BAR.cache),
           tokens: Schema.boolean().default(DEFAULT_STATUS_BAR.tokens),
+          cost: Schema.boolean().default(DEFAULT_STATUS_BAR.cost),
           tps: Schema.boolean().default(DEFAULT_STATUS_BAR.tps),
           gitBranch: Schema.boolean().default(DEFAULT_STATUS_BAR.gitBranch),
           sessionTitle: Schema.boolean().default(DEFAULT_STATUS_BAR.sessionTitle),
@@ -646,7 +647,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
           trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
           shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
-        }).default({ ...DEFAULT_STATUS_BAR }),
+          pluginSegments: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginSegments),
+          // Explicit footer arrangement. Set, it overrides every field
+          // switch above; `|` splits left from the right-aligned group.
+          layout: Schema.array(Schema.string()).default([]),
+        }).default({ ...DEFAULT_STATUS_BAR, layout: [] }),
         // Header pixel whale art; on unless settings.yaml says otherwise.
         whale: Schema.boolean().default(true),
         // Idle whale behaviors after the intro settles; off by default —
