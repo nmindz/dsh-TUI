@@ -9180,10 +9180,17 @@ ${output}
         const detail = reason.kind === 'error' ? cleanRenderText(reason.error.message, NOTICE_CELLS) : ''
         state.rows.push({ id: nextRowId, kind: 'notice', text: `turn ${reason.kind}${detail ? ` · ${detail}` : ''}` })
         nextRowId += 1
-        state.notify(
-          t('turn-failed', { detail: detail ? ` · ${detail}` : '' }),
-          { color: 'error', timeoutMs: 8000 },
-        )
+        // The transcript notice above is history and must paint on replay.
+        // The toast is not: it announces something that just happened, so
+        // firing it while replaying re-raises every failure the session ever
+        // recorded as if it were live — a /resume of a session that once hit
+        // a provider 529 pops "Turn error · Overloaded" with nothing wrong.
+        if (!replaying) {
+          state.notify(
+            t('turn-failed', { detail: detail ? ` · ${detail}` : '' }),
+            { color: 'error', timeoutMs: 8000 },
+          )
+        }
         break
       }
       case 'request/context':
