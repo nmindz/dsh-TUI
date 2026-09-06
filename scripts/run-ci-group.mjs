@@ -459,6 +459,12 @@ const GROUPS = {
 // provider 直达模型层、缺席当前 provider 落首行）。键盘与 overlay 归约
 // 由 verify-chat-overlay 覆盖，这里钉住两层共用的纯派生。
     ["verify-model-picker-groups", ['node', 'scripts/verify-model-picker-groups.mjs']],
+// /model 顶层 provider 行的来源回归：注册表会列出所有已挂载的目录族
+// （openai/xai/deepseek 出厂即挂载），但只有 llm-pi-ai.providers 里声明过
+// 的路由才配有行——否则会把用户从未配置的 provider 摆进选择器（进去只能
+// 说“不可用”）。同时钉住：已配置但零模型的路由保留行；无 settings 服务
+// 时回落整份注册表而非空列表。
+    ["verify-provider-listing", ['node', 'scripts/verify-provider-listing.mjs']],
 // 全屏出厂默认迁移回归（0.9.x schema + cordis.patch.yml false→true 翻转）：
 // 翻转前钉在 settings 用户层的显式 false 首启被 unset 一次（marker 仅在
 // 写入成功后落盘，失败下次自愈重试），此后再写的 false 是用户主动选择
