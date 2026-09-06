@@ -13,7 +13,7 @@
 
 import type React from 'react'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { cleanScalarText } from './sanitize.js'
+import { capCells, cleanScalarText, flattenInline } from './sanitize.js'
 import { stringWidth } from '../ink/stringWidth.js'
 import type { Theme } from '../theme.js'
 import { FOOTER_FIELD_IDS } from '../tuiDisplayPrefs.js'
@@ -745,8 +745,13 @@ export class TuiStatusRuntime extends Service {
 function cleanDecorationSide(value: unknown): string | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return ''
-  const cleaned = cleanScalarText(value, DECORATION_CELLS)
-  return cleaned === '' ? '' : cleaned
+  // NOT cleanScalarText: that trims, and an icon's trailing space IS the
+  // separator between the icon and the field ('🧠 ' + model). Trimming it
+  // glued every decoration to its field. Strip control characters and cap in
+  // cells, but preserve edge whitespace exactly as the plugin wrote it.
+  const flat = flattenInline(String(value)).replace(/\s/gu, ' ')
+  const capped = capCells(flat, DECORATION_CELLS)
+  return capped === '' ? '' : capped
 }
 
 /** Sanitize a value→icon lookup table; undefined when unusable. */
