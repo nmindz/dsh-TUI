@@ -184,6 +184,7 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、
 | `DSH_TUI_RESUME_SESSION` | 启动时恢复指定会话，通常由启动器设置 |
 | `DSH_TUI_WORKSPACE_TARGET` | 启动时解析的工作区路径或 URI，通常由 `dsh-tui <目标>` 设置 |
 | `DSH_TUI_SESSION_ROOT` | 覆盖 JSONL 会话根目录；profile 默认 `$DSH_HOME/sessions`，裸 `cordis.yml` 默认 `~/.dsh-tui/sessions` |
+| `DSH_TUI_OAUTH_PROVIDERS` | 逗号分隔，覆盖 dsh-auth 认领的 llm 路由集（默认 `openai-codex,anthropic,xai`）。注册表先到先得 → `llm-pi-ai:` 已配置的同名路由必须在此移除才能生效 |
 | `DSH_PERMISSION_MODE` | 非 Windows 平台覆盖 sandbox policy，例如 `workspace-write` 或 `danger-full-access` |
 | `DSH_TUI_WORKSPACE` | Windows `dsh-tui.cmd` 采用的工作目录 |
 | `DSH_TUI_DEBUG` | 启用写往 stderr 的 dsh-tui 调试日志 |
@@ -230,6 +231,8 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、
   注册由 dsh-auth 拥有，`/auth status|login|logout` 与此分支同源。未挂载
   dsh-auth 时选项不出现，向导与之前完全一致；挂载了插件但没有可 OAuth 登录的
   provider 时会给出提示。
+
+**路由认领与冲突**：dsh-auth 默认认领 `openai-codex`、`anthropic`、`xai` 三条 llm 路由，无论是否已登录。llm 注册表先到先得，两个 adapter 家族都异步注册，因此 settings.yaml 里 `llm-pi-ai:` 配置的同名路由可能被抢占——被抢占的一方只在 harness 日志里报错。dsh-auth 的路由未登录时目录为空，`/model` 因此把该 provider 显示为「无可用模型」而不是隐藏它。要让 `llm-pi-ai` 的同名路由生效，用 `DSH_TUI_OAUTH_PROVIDERS` 去掉冲突路由（例：`DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`）；dsh-auth 拒绝空列表，完全不要订阅登录就在 profile patch 里 `disabled: true` 整行禁用。
 
 写入/删除产物（profile 启动时，dsh-base 提供 settings/credentials 服务）：
 
