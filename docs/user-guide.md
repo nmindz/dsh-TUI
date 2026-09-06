@@ -425,8 +425,8 @@ dsh-TUI 不预装通用技能。`/skills` 浏览 DSH 从当前 profile、用户�
 流式中显示 1/8 格实时 gauge + `N tps`；回合结束后显示最近 12 样本 min-max sparkline。
 速度语义色：**≥50 绿 / ≥20 黄 / <20 红**。
 
-**插件状态段**（`statusBar.pluginSegments`，默认开）
-插件经 `tuiStatus.setSegment` 贡献的纯文本段，默认追加在同组内建字段之后——新增一段不会打乱既有顺序。悬停显示插件提供的补充说明；关掉此开关即整体隐藏，minimal 模式下一律不显示。详见 [interaction.md](interaction.md)。
+**插件状态段与字段图标**（`statusBar.pluginSegments`，默认开）
+插件经 `tuiStatus.setSegment` 贡献的纯文本段，默认追加在同组内建字段之后——新增一段不会打乱既有顺序。悬停显示插件提供的补充说明。插件还能用 `tuiStatus.decorateField` 给**内建**字段加图标（如模型前的 🧠、推理强度前的档位符号）：宿主继续渲染该字段，所以 hover 详情原样保留——想加图标又不丢 `model`/`cache` 的悬停信息，就用装饰而不是拿段顶替。关掉此开关即整体隐藏段与图标，minimal 模式下一律不显示。详见 [interaction.md](interaction.md)。
 
 **页脚布局**（`statusBar.layout`，默认空 = 保持默认布局）
 逗号分隔的字段顺序，用于完全重排、隐藏或混排页脚。一旦填写即**压过上面所有字段开关**：只有列出的槽位会渲染，且按列出顺序排列。

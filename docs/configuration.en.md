@@ -112,7 +112,7 @@ it to finish or stop it with `Ctrl+C` before restarting.
 | `activity` | `false` | Idle working-activity summary |
 | `trajectory` | `false` | Mini trajectory wake at the footer's right edge |
 | `shortcutHint` | `false` | Idle `? for shortcuts` reminder |
-| `pluginSegments` | `true` | Render footer segments contributed by plugins through `tuiStatus.setSegment` |
+| `pluginSegments` | `true` | Render footer segments contributed by plugins through `tuiStatus.setSegment`. Also governs icons plugins add to built-in fields through `tuiStatus.decorateField` |
 | `layout` | unset | Explicit footer arrangement; see below |
 
 `layout` is a flat token list for rearranging, hiding, or mixing the footer. **Once set it overrides every field switch above**: only listed slots render, in listed order.
