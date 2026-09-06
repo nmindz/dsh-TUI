@@ -3,7 +3,8 @@ import { Box, Text, useTerminalSize, useTheme } from '../ui.js'
 import type { Color } from '../ink/styles.js'
 import { formatTokens } from '../terminal-utils/format.js'
 import { t } from '../i18n.js'
-import { formatContextUsage, DEFAULT_STATUS_BAR, normalizeStatusBar, type FooterFieldId, type StatusBarConfig } from '../tuiDisplayPrefs.js'
+import { formatContextUsage, DEFAULT_STATUS_BAR, FOOTER_LAYOUT_SPACER, FOOTER_LAYOUT_WILDCARD, normalizeStatusBar, type FooterFieldId, type StatusBarConfig } from '../tuiDisplayPrefs.js'
+import type { TuiFooterSegmentEntry } from '../dsh-adapter/status.js'
 import { estimateSessionCostCny, estimateSessionCostSplitCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { ActivityLine, contextPressurePct } from '../components/ActivityLine.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
@@ -12,6 +13,8 @@ import { formatJobDuration, type BackgroundJobState } from '../dsh-adapter/jobs.
 /** Stable fallback for stubbed channels: verify/repro harnesses render the
  *  real Chat with partial channel literals that predate the jobs field. */
 const NO_BACKGROUND_JOBS: readonly BackgroundJobState[] = []
+/** Same stable-empty trick for hosts and harnesses without the seam. */
+const NO_FOOTER_SEGMENTS: readonly TuiFooterSegmentEntry[] = []
 import type { Channel } from '../dsh-adapter/channel.js'
 import { modeDisplayName } from '../sessionModes.js'
 import { MiniWake } from '../components/trajectory/MiniWake.js'
@@ -61,6 +64,7 @@ type HoverTarget =
   | 'cwd'
   | 'title'
   | `segment:${string}`
+  | `plugin:${string}`
 
 /** One inline footer field: `node` renders inside a shrinkable, optionally
  *  hoverable Box; `key` doubles as the React key in its row. */
@@ -156,11 +160,14 @@ function FieldLine({
 
 export function StatusLine({
   channel,
+  segments = NO_FOOTER_SEGMENTS,
   selectionActive = false,
   helpOpen = false,
   wake,
 }: {
   channel: Channel
+  /** Admitted plugin footer segments (`ctx.tuiStatus.setSegment`). */
+  segments?: readonly TuiFooterSegmentEntry[]
   selectionActive?: boolean
   helpOpen?: boolean
   /**
@@ -426,9 +433,78 @@ export function StatusLine({
     ids
       .filter(id => slotEnabled(statusBar, id) && available.has(id))
       .map(id => available.get(id)!)
-  const leftFields: FieldPart[] = pickSlots(STOCK_LEFT)
-  const rightFields: FieldPart[] = pickSlots(STOCK_RIGHT)
-  const ctxRender = statusBar.contextUsage ? available.get('ctx')?.node : undefined
+
+  // Plugin footer segments: text-only, host-built cells. Minimal mode and
+  // the `pluginSegments` switch drop them wholesale, and the store has
+  // already sorted them by declared order then registration order.
+  const pluginSegments = channel.minimal || !statusBar.pluginSegments ? NO_FOOTER_SEGMENTS : segments
+  const segmentPart = (entry: TuiFooterSegmentEntry): FieldPart => ({
+    key: `plugin:${entry.key}`,
+    id: `plugin:${entry.key}`,
+    ...(entry.tooltip === undefined ? {} : { tooltip: entry.tooltip }),
+    node: (
+      <Text
+        {...(entry.color === undefined ? {} : { color: entry.color })}
+        {...(entry.dim ? { dimColor: true } : {})}
+      >
+        {entry.text}
+      </Text>
+    ),
+  })
+
+  // An explicit layout owns the footer: membership decides what renders
+  // (the per-field switches no longer gate), and array position decides
+  // where. Minimal mode never reaches here — it rebuilds `statusBar` from
+  // the defaults, which carry no layout.
+  const layoutTokens = statusBar.layout
+  const usingLayout = layoutTokens !== undefined
+  const segmentByKey = new Map(pluginSegments.map(entry => [entry.key, entry]))
+  const namedInLayout = new Set(layoutTokens ?? [])
+  const resolveTokens = (tokens: readonly string[]): FieldPart[] =>
+    tokens.flatMap(token => {
+      // `*` is the escape hatch for plugins that register after the layout
+      // was written: it expands to every segment not named explicitly.
+      if (token === FOOTER_LAYOUT_WILDCARD) {
+        return pluginSegments
+          .filter(entry => !namedInLayout.has(entry.key))
+          .map(segmentPart)
+      }
+      const builtIn = available.get(token as FooterSlotId)
+      if (builtIn !== undefined) return [builtIn]
+      const segment = segmentByKey.get(token)
+      // Unknown tokens (a typo, or a plugin that never registered) resolve
+      // to nothing; the config layer owns warning about them.
+      return segment === undefined ? [] : [segmentPart(segment)]
+    })
+
+  let leftFields: FieldPart[]
+  let rightFields: FieldPart[]
+  let ctxRender: React.ReactNode | undefined
+  if (layoutTokens !== undefined) {
+    const cut = layoutTokens.indexOf(FOOTER_LAYOUT_SPACER)
+    const leftTokens = cut < 0 ? layoutTokens : layoutTokens.slice(0, cut)
+    const rightTokens = cut < 0 ? [] : layoutTokens.slice(cut + 1)
+    // The jobs chip is never addressable, so a layout cannot drop it; it
+    // leads the left group rather than sitting at its stock position.
+    const jobs = available.get('jobs')
+    leftFields = [...(jobs === undefined ? [] : [jobs]), ...resolveTokens(leftTokens)]
+    rightFields = resolveTokens(rightTokens)
+    // `ctx` resolves inline at its token position under a layout, so the
+    // compact renderer's pinned-right box is not used.
+    ctxRender = undefined
+  } else {
+    // Additive: plugin segments trail the built-in fields of their declared
+    // group, so adding one never disturbs the stock order.
+    leftFields = [
+      ...pickSlots(STOCK_LEFT),
+      ...pluginSegments.filter(entry => entry.placement === 'footer-left').map(segmentPart),
+    ]
+    rightFields = [
+      ...pickSlots(STOCK_RIGHT),
+      ...pluginSegments.filter(entry => entry.placement === 'footer-right').map(segmentPart),
+    ]
+    ctxRender = statusBar.contextUsage ? available.get('ctx')?.node : undefined
+  }
 
   const hint = selectionActive
     ? t('statusline-hint-select')
@@ -460,7 +536,7 @@ export function StatusLine({
 
   // The supplemental-row readout for the hovered field: replaces the idle
   // hint (never the activity line) while the pointer dwells on a field.
-  const detail = buildHoverDetail(hover, channel, usage, contextUsed)
+  const detail = buildHoverDetail(hover, channel, usage, contextUsed, pluginSegments)
   const trailer: React.ReactNode = detail !== null
     ? detail
     : hint !== ''
@@ -472,7 +548,13 @@ export function StatusLine({
     ...leftFields,
     ...(ctxRender !== undefined ? [{ key: 'context', id: 'ctx' as const, node: ctxRender }] : []),
   ]
-  const hasStatusFields = compactFields.length > 0 || ctxRender !== undefined
+  // A layout always renders through the two-group row: `|` has to mean
+  // something, and the compact row folds the right group into the left.
+  // `compact` then only abbreviates (cwd basename, percent-first ctx).
+  const useCompactRow = statusBar.compact && !usingLayout
+  const hasStatusFields = usingLayout
+    ? leftFields.length > 0 || rightFields.length > 0
+    : compactFields.length > 0 || ctxRender !== undefined
   // The supplemental row is PERMANENTLY mounted (height pinned to 1)
   // whenever the footer carries hoverable chrome — mounting it from nothing
   // on hover is what made the footer grow mid-gesture and shoved the
@@ -518,7 +600,7 @@ export function StatusLine({
           />
         ) : null}
         {/* Row 2: optional status fields — every field is independently gated. */}
-        {hasStatusFields ? statusBar.compact ? (
+        {hasStatusFields ? useCompactRow ? (
           <Box flexDirection="row" justifyContent="space-between" gap={2}>
             <Box flexGrow={1} flexShrink={1} flexDirection="row" overflow="hidden">
               <FieldLine parts={compactFields} hoverProps={hoverProps} />
@@ -599,10 +681,19 @@ function buildHoverDetail(
   channel: Channel,
   usage: UsageSnapshot | undefined,
   contextUsed: number | undefined,
+  segments: readonly TuiFooterSegmentEntry[] = NO_FOOTER_SEGMENTS,
 ): React.ReactNode | null {
   if (hover === null) return null
   const window = channel.contextWindow
   const dim = (label: string): React.ReactNode => <Text dimColor>{label}</Text>
+
+  // Plugin segments answer a hover only when they supplied a detail; the
+  // prefix cannot collide with the context-bar's `segment:` targets.
+  if (hover.startsWith('plugin:')) {
+    const entry = segments.find(candidate => candidate.key === hover.slice('plugin:'.length))
+    if (entry?.detail === undefined) return null
+    return <Text wrap="truncate">{entry.detail}</Text>
+  }
 
   if (hover.startsWith('segment:')) {
     if (window === undefined || window <= 0 || contextUsed === undefined) return null
