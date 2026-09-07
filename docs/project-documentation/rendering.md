@@ -173,10 +173,56 @@ chars/4 估算、provider usage 结算、重试式延迟留在同一步 decode �
 
 | 组件 | 位置 | 行为 |
 | --- | --- | --- |
-| line-width-cache | `src/ink/line-width-cache.ts` | 按行缓存 stringWidth（流式期间已完结行不可变，每 token 减少约 50 倍调用）；有界化（OOM 修复，提交 2f60c33）：4096 条 / 10 万字符预算 / 超 500 字符的行永不缓存（流式增长尾行每帧新键零复用）/ 超预算整表清空；detachString 用 Buffer 往返复制键，避免 V8 SlicedString 钉住整条流式父串（实测 10KB 行×3000 帧驻留 1.15GB→2.3MB） |
+| line-width-cache | `src/ink/line-width-cache.ts` | 按行缓存 stringWidth（流式期间已完结行不可变，每 token 减少约 50 倍调用）；经 `BoundedTextCache` 有界化：32768 条 / 200 万字符预算 / 超 65536 字符的行不缓存 / 超预算按最旧淘汰（**不是**整表清空）；detachString 用 Buffer 往返复制键，避免 V8 SlicedString 钉住整条流式父串（实测 10KB 行×3000 帧驻留 1.15GB→2.3MB）。定尺见下节「行宽预算的定尺」 |
+| 跨挂载换行缓存 | `src/ink/wrap-text.ts` | 内容寻址缓存 (text, maxWidth, wrapType) → 换行结果，服务两条重算路径：虚拟化把滚出的行卸载后重新挂载会重跑整段 wrap，且 paint 对每个可见文本节点无逐节点缓存。经 `BoundedTextCache` 有界化：16384 条 / 200 万字符 / 最旧淘汰；条数（而非字符数）是这里的紧约束——长会话同时挂载数千个文本节点 |
 | measure-text | `src/ink/measure-text.ts:22-45` | 单遍测量：按 '\n' 切行循环，每行 lineWidth(line) 取最大宽；noWrap 需在循环前判定（Math.ceil(w/Infinity)=0 陷阱）；非 noWrap 每行高 Math.ceil(w/maxWidth)，w===0 记 1；空串返回 0 |
 | measureTextNode | `src/ink/dom.ts:447-483` | 显示宽度进入 Yoga 布局的入口：expandTabs（按最坏 8 空格）→ measureText 测宽高 → 超宽按 textWrap 用 wrapText 换行后复测；含 \n 且 Undefined 模式用 max(width, 自然宽) 防高度虚增 |
 | 增量缓存 | `src/ink/dom.ts:485-546` | 同一节点同宽同 wrap 且文本前缀增长时，只对尾行 re-wrap（O(当前行) 而非 O(整文)），已完结逻辑行提交进 headHeight |
+| Yoga 逐节点布局缓存 | `src/native-ts/yoga-layout/index.ts` | 单槽 `_hasL`（最近一次 layout 遍入参）+ `CACHE_SLOT_CAPACITY=16` 多槽 `_cIn/_cOut`（入参组 → w/h），轮转淘汰；多槽只服务 measure 遍 |
+
+#### 行宽预算的定尺（`MAX_CACHE_CHARS` / `MAX_CACHEABLE_LINE`）
+
+布局每遍按同一顺序重测所有挂载文本节点，属循环访问。此时「溢出即整表清空」会让下一遍必须重测它刚丢掉的内容：命中率不是缓慢退化，而是直接塌到 ~0，且**永不收敛**。
+
+实测（真实会话 2586 事件 / 2.66MB，抽出 transcript 文本 8394 行 / 657KB，对旧预算 10 万字符）：
+
+| 遍次 | 旧行为（4096 条 / 10 万字符 / 整表清空） | 现行为（32768 条 / 200 万字符 / 最旧淘汰） |
+| --- | --- | --- |
+| 0（冷） | 97.37ms，未命中 88%，清表 4 次 | 63.88ms |
+| 1 | 29.49ms，未命中 89%，清表 5 次 | 0.96ms |
+| 2 | 36.36ms，未命中 89%，清表 5 次 | 0.89ms |
+| 3 | 29.98ms，未命中 88%，清表 5 次 | 0.89ms |
+
+稳定态约 33×（29.98 → 0.89ms/遍）。注意循环访问下 LRU 与 FIFO 同样塌陷，所以修复的关键是**预算 ≥ 工作集**，淘汰策略只用来兜住离群值；命中路径因此不做 recency 记账（该路径每帧约 10 万次查询）。
+
+`MAX_CACHEABLE_LINE` 为何取大值：该会话行长 p50 52 / p90 132 / p99 515 / p99.9 2273 / max 30306。上限 4096 已覆盖几乎全部行，看似够用；但把唯一超限的 30KB 行排除后，它每遍布局要重测 **4.089ms**，约为整个已缓存工作集（0.89ms）的 4.5 倍——长行正是最贵的行，排除长行反而是净损失。故只挡病态行（65536）。
+
+回归：`scripts/verify-text-measure-cache.ts`（`render-scroll` 组）。负反控制：把预算改回旧值后，第二遍新增 6060 次未命中（8394 行中 6060 个唯一键），即 100% 未命中率，两条保留断言同时失败。
+
+#### 槽位预算的定尺（`CACHE_SLOT_CAPACITY`）
+
+预算必须覆盖「单帧内同一节点被探测的入参组数」，否则轮转淘汰遇上循环探测顺序，命中率塌到 ~0——与 line-width-cache、wrap-text 的溢出塌陷同一类缺陷，只是淘汰策略不同。
+
+实测（`scripts/bench-yoga.tsx` 的 steady 负载：108×34、81 个 measure 节点的 187 节点树、纯流式追加不 resize）：
+
+| 每节点入参组数 | 4 | 6 | 8 | 11 |
+| --- | --- | --- | --- | --- |
+| 节点数 | 2 | 1 | 19 | 3 |
+
+即 25 个热节点里 22 个工作集为 8–11 组，而旧预算是 4。后果与修复效果（同一台机器、同一负载）：
+
+| 预算 | 单帧 measure 调用 | 单帧 layoutNode visited |
+| --- | --- | --- |
+| 4（旧） | ≈1425 | ≈4506 |
+| 16 | ≈12 | ≈554 |
+
+命中一旦成立，级联在容器层就短路，下游叶子根本不会被走到——这就是 1425→12 远超「209 个不同入参组」下限的原因。
+
+#### 多槽命中只服务 measure 遍
+
+layout 遍的早退会跳过子节点定位递归（STEP 5）。一个子树在任一时刻只处于「一种已布局状态」，即最后一次 layout 遍那组入参对应的状态；`_hasL` 存的正是这组。若允许多槽缓存服务 layout 遍，容器就可能命中「另一组入参」的 w/h 并跳过递归，把被跳过的子树留在 measure 探测写下的临时几何上（实测：时间线竖轴 `ink-text` 停在 1 行高，而其外框已是 5 行）。槽位从 4 加到 16 会让这类命中大幅变多，因此把多槽读取限定为 `!performLayout`。
+
+回归：`scripts/verify-yoga-layout-cache.ts`（render-scroll 组）。陈旧检测的判据是「缓存结果 vs markTreeDirty 后整树重算」逐字节相等。四组负反控：撤掉 markDirty 后必须读到陈旧值、预算回 4 后单元与整树两处断言都必须失败、放回 layout 遍命中后陈旧断言必须失败。
 
 ### 换行与截断
 

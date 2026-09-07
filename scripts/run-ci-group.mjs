@@ -129,6 +129,15 @@ const GROUPS = {
 // 恢复历史会话落点回归：/resume 后最新消息末行必须可见且可达
 // （scrollToBottom 补画完成后的锚定终态），不再落屏外。
     ["repro-resume-position", ['node', '--import', 'tsx/esm', 'scripts/repro-resume-position.tsx']],
+// 文本测量缓存保留回归：布局每帧循环重测挂载文本节点，缓存溢出若整表
+// 清空则命中率塌到 0（长会话每帧全量重测宽度）。断言超预算工作集仍进
+// 稳定态、溢出按最旧淘汰、缓存值等于直接测量。
+    ["verify-text-measure-cache", ['node', '--import', 'tsx/esm', 'scripts/verify-text-measure-cache.ts']],
+// Yoga 逐节点布局缓存回归：槽位预算须覆盖单帧探测的入参组（预算不足时轮转
+// 淘汰把命中率压到 0，每帧全量重测），且多槽命中只服务 measure 遍——layout
+// 遍命中会跳过子节点递归，把子树留在探测用的临时几何上。四组负反控：撤失效、
+// 预算回 4（单元与整树各一）、放回 layout 遍命中。
+    ["verify-yoga-layout-cache", ['node', '--import', 'tsx/esm', 'scripts/verify-yoga-layout-cache.ts']],
   ],
   'input-terminal': [
 // 按键解析回归（issue #110）：Option+Enter（ESC CR）精确/合并/分块

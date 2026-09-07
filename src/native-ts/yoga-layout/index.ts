@@ -561,10 +561,9 @@ export class Node {
   /**
    * Input matrix of the multi-entry layout cache — stores (inputs → computed
    * w,h) so hits with different inputs than _hasL can restore the right
-   * dimensions. Upstream yoga uses 16; 4 covers Ink's dirty-chain depth.
-   * Packed as flat arrays to avoid per-entry object allocs. Slot i uses
-   * indices [i*8, i*8+8) in _cIn (aW,aH,wM,hM,oW,oH,fW,fH) and [i*2, i*2+2)
-   * in _cOut (w,h).
+   * dimensions. Sized by CACHE_SLOT_CAPACITY. Packed as flat arrays to avoid
+   * per-entry object allocs. Slot i uses indices [i*8, i*8+8) in _cIn
+   * (aW,aH,wM,hM,oW,oH,fW,fH) and [i*2, i*2+2) in _cOut (w,h).
    */
   _cIn: Float64Array | null = null
   /** Cached output width/height pairs, two slots per entry. */
@@ -1436,7 +1435,53 @@ export class Node {
 
 const DEFAULT_CONFIG = createConfig()
 
-const CACHE_SLOTS = 4
+// Allocated slots of the per-node layout cache, matching upstream yoga's 16.
+// One flexbox pass probes a hot node with up to 11 distinct input tuples and
+// evicts round-robin, so a budget under that working set turns the cyclic
+// probe order into a ~0% hit rate. Sizing evidence in
+// docs/project-documentation/rendering.md.
+const CACHE_SLOT_CAPACITY = 16
+// Slots actually used. Always the capacity in production; the negative
+// control in scripts/verify-yoga-layout-cache.ts shrinks it to reproduce the
+// undersized-budget thrash. Arrays stay capacity-sized so every budget in
+// [1, CACHE_SLOT_CAPACITY] indexes in range.
+let cacheSlots = CACHE_SLOT_CAPACITY
+
+/**
+ * Read the per-node layout-cache slot budget and its allocated capacity.
+ * @returns the active budget and the capacity every node's arrays are sized to.
+ */
+export function layoutCacheSlotsForTest(): {
+  slots: number
+  capacity: number
+} {
+  return { slots: cacheSlots, capacity: CACHE_SLOT_CAPACITY }
+}
+
+/**
+ * Shrink or restore the per-node layout-cache slot budget. Test-only hook for
+ * the undersized-budget negative control; nodes written under an earlier
+ * budget keep their populated slots, so drive it from a freshly built tree.
+ * @param slots - the budget, clamped to [1, CACHE_SLOT_CAPACITY].
+ */
+export function setLayoutCacheSlotsForTest(slots: number): void {
+  cacheSlots = Math.max(1, Math.min(CACHE_SLOT_CAPACITY, Math.trunc(slots)))
+}
+
+// Off in production: the multi-entry cache serves measure calls only. The
+// negative control turns layout-pass hits back on to show they leave skipped
+// subtrees at measure-scratch geometry.
+let cacheLayoutPassHits = false
+
+/**
+ * Re-admit layout-pass hits into the multi-entry cache. Test-only hook for the
+ * stale-geometry negative control.
+ * @param enabled - true to re-admit the unsound layout-pass hits.
+ */
+export function setLayoutCacheLayoutPassHitsForTest(enabled: boolean): void {
+  cacheLayoutPassHits = enabled
+}
+
 function cacheWrite(
   node: Node,
   aW: number,
@@ -1450,8 +1495,8 @@ function cacheWrite(
   wasDirty: boolean,
 ): void {
   if (!node._cIn) {
-    node._cIn = new Float64Array(CACHE_SLOTS * 8)
-    node._cOut = new Float64Array(CACHE_SLOTS * 2)
+    node._cIn = new Float64Array(CACHE_SLOT_CAPACITY * 8)
+    node._cOut = new Float64Array(CACHE_SLOT_CAPACITY * 2)
   }
   // First write after a dirty clears stale entries from before the dirty.
   // _cGen < _generation means entries are from a previous calculateLayout;
@@ -1463,10 +1508,10 @@ function cacheWrite(
     node._cN = 0
     node._cWr = 0
   }
-  // LRU write index wraps; _cN stays at CACHE_SLOTS so the read scan always
+  // LRU write index wraps; _cN stays at the budget so the read scan always
   // checks all populated slots (not just those since last wrap).
-  const i = node._cWr++ % CACHE_SLOTS
-  if (node._cN < CACHE_SLOTS) node._cN = node._cWr
+  const i = node._cWr++ % cacheSlots
+  if (node._cN < cacheSlots) node._cN = node._cWr
   const o = i * 8
   const cIn = node._cIn
   cIn[o] = aW
@@ -1591,24 +1636,22 @@ function layoutNode(
       layout.height = node._lOutH
       return
     }
-    // Multi-entry cache: scan for matching inputs, restore cached w/h on hit.
-    // Covers the scroll case where a dirty ancestor's measure→layout cascade
-    // produces N>1 distinct input combos per clean child — the single _hasL
-    // slot thrashed, forcing full subtree recursion. With 500-message
-    // scrollbox and one dirty leaf, this took dirty-leaf relayout from
-    // 76k layoutNode calls (21.7×nodes) to 4k (1.2×nodes), 6.86ms → 550µs.
-    // Same-generation check covers fresh-mounted (dirty) nodes during
-    // virtual scroll — the dirty chain invokes them ≥2^depth times, first
-    // call writes cache, rest hit: 105k visits → ~10k for 1593-node tree.
+    // Multi-entry cache: scan inputs, restore cached w/h. Absorbs the many
+    // probe tuples a dirty ancestor's measure→layout cascade sends per clean
+    // child, which thrash the single _hasL slot. MEASURE calls only — a
+    // subtree holds one laid-out state, and _hasL above is the tuple that
+    // state belongs to. Rationale in docs/project-documentation/rendering.md.
     if (
       node._cN > 0 &&
-      (sameGen || !node.isDirty_) &&
-      // Same scratch guard as _hasL: a layout-pass hit must not skip child
-      // recursion over a measure-scratched subtree.
-      !(performLayout && node._scratchGen === _generation)
+      (!performLayout ||
+        (cacheLayoutPassHits && node._scratchGen !== _generation)) &&
+      (sameGen || !node.isDirty_)
     ) {
       const cIn = node._cIn!
-      for (let i = 0; i < node._cN; i++) {
+      // Bound by the budget as well as the populated count: a shrunk budget
+      // (negative control) must not still see slots written under a wider one.
+      const scanN = node._cN < cacheSlots ? node._cN : cacheSlots
+      for (let i = 0; i < scanN; i++) {
         const o = i * 8
         if (
           cIn[o + 2] === widthMode &&
