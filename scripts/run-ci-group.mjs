@@ -262,6 +262,10 @@ const GROUPS = {
 //    与粘性报错、真 Chat 驱动的对话框/状态行/快捷键端到端。
     ["verify-extension-events", ['node', '--import', 'tsx/esm', 'scripts/verify-extension-events.tsx']],
     ["verify-extension-ui", ['node', '--import', 'tsx/esm', 'scripts/verify-extension-ui.tsx']],
+// 页脚段台账回归：内容不变的重复 setSegment 不写记录（插件按定时器刷新，
+// 曾把 ledger 写到 27MB），文本/颜色变化各写一条 replace，dispose 写一条
+// release；已准入插件不传 identity 也归属到 componentId 而非 undeclared。
+    ["verify-status-segment-ledger", ['node', '--import', 'tsx/esm', 'scripts/verify-status-segment-ledger.ts']],
 // 显示偏好回归：statusBar 字段开关、compact/full 两种页脚布局、cwd 波浪号
 // 折叠、goal chip、working/selection 提示、上下文条与 wake。底部状态栏的
 // 主回归套件——改 StatusLine 字段或顺序必须先过这一关。

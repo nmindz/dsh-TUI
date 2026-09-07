@@ -457,6 +457,7 @@ export class TuiStatusRuntime extends Service {
         ctx.logger.warn(`dsh-tui: status view "${key}" crashed and was hidden: %o`, error)
       }),
       nextToken: 1,
+      segments: new Map(),
     }
     hostStatusStores.set(this, state)
     ctx.effect(() => () => state.store.clear())
@@ -549,7 +550,7 @@ export class TuiStatusRuntime extends Service {
     const ledger = caller.get('tuiEffectLedger')
     if (cleaned === undefined || cleaned === '') {
       store.set(normalized, undefined, 0, owner)
-      if (had) ledger?.record({ operation: 'release', resource: { kind: 'status', id: normalized }, result: 'applied' }, identity)
+      if (had) ledger?.record({ operation: 'release', resource: { kind: 'status', id: normalized }, result: 'applied' }, identity ?? caller)
       return noop
     }
     const token = state.nextToken++
@@ -563,7 +564,7 @@ export class TuiStatusRuntime extends Service {
       if (store.clearIf(normalized, token, owner) && ledgerApplied) {
         caller.get('tuiEffectLedger')?.record(
           { operation: 'release', resource: { kind: 'status', id: normalized }, result: 'applied' },
-          identity,
+          identity ?? caller,
         )
       }
       const cleanup = ownerCleanup
@@ -581,7 +582,7 @@ export class TuiStatusRuntime extends Service {
         result: 'applied',
         ...(had ? { replaces: { resourceId: normalized } } : {}),
       },
-      identity,
+      identity ?? caller,
     )
     ledgerApplied = true
     return dispose
@@ -660,7 +661,7 @@ export class TuiStatusRuntime extends Service {
           result: 'failed',
           errorCode: 'DUPLICATE_CONTRIBUTION_ID',
         },
-        identity,
+        identity ?? caller,
       )
       return undefined
     }
@@ -689,7 +690,7 @@ export class TuiStatusRuntime extends Service {
       if (store.clearViewIf(normalized, token, owner) && ledgerApplied) {
         caller.get('tuiEffectLedger')?.record(
           { operation: 'release', resource: { kind: 'status', id: normalized }, result: 'applied' },
-          identity,
+          identity ?? caller,
         )
       }
       const cleanup = ownerCleanup
@@ -702,7 +703,7 @@ export class TuiStatusRuntime extends Service {
     if (!bound) return undefined
     caller.get('tuiEffectLedger')?.record(
       { operation: 'bind', resource: { kind: 'status', id: normalized }, result: 'applied' },
-      identity,
+      identity ?? caller,
     )
     ledgerApplied = true
     return dispose
@@ -853,7 +854,7 @@ function decorateFooterField(
         result: 'failed',
         errorCode: 'DUPLICATE_CONTRIBUTION_ID',
       },
-      identity,
+      identity ?? caller,
     )
     return undefined
   }
@@ -880,7 +881,7 @@ function decorateFooterField(
     if (store.clearDecorationIf(target, token, owner) && ledgerApplied) {
       caller.get('tuiEffectLedger')?.record(
         { operation: 'release', resource: { kind: 'status', id: `decoration:${target}` }, result: 'applied' },
-        identity,
+        identity ?? caller,
       )
     }
     const cleanup = ownerCleanup
@@ -898,7 +899,7 @@ function decorateFooterField(
       result: 'applied',
       ...(had ? { replaces: { resourceId: `decoration:${target}` } } : {}),
     },
-    identity,
+    identity ?? caller,
   )
   ledgerApplied = true
   return dispose
@@ -985,7 +986,7 @@ function setFooterSegment(
         result: 'failed',
         errorCode: 'DUPLICATE_CONTRIBUTION_ID',
       },
-      identity,
+      identity ?? caller,
     )
     return undefined
   }
@@ -1007,6 +1008,23 @@ function setFooterSegment(
   }
   const detail = raw.detail === undefined ? undefined : cleanScalarText(raw.detail, FOOTER_DETAIL_CELLS)
   const tooltip = raw.tooltip === undefined ? undefined : cleanScalarText(raw.tooltip, FOOTER_DETAIL_CELLS)
+  // A refresh that produces byte-identical content is not a state change.
+  // Plugins poll on a timer, so without this every tick wrote a ledger pair
+  // and re-emitted the store; git/node segments alone reached ~90k records.
+  const signature = JSON.stringify([
+    placement, text, raw.color ?? null, raw.dim === true,
+    typeof raw.order === 'number' ? raw.order : 0,
+    detail === '' ? null : detail ?? null, tooltip === '' ? null : tooltip ?? null,
+  ])
+  const live = state.segments.get(normalized)
+  if (live !== undefined && live.owner === owner && live.signature === signature
+    && store.segmentOwnerOf(normalized) !== undefined) {
+    return live.dispose
+  }
+  // Replacing this key: retire the old binding so a long-lived plugin does
+  // not accumulate one caller effect per content change.
+  if (live !== undefined && live.owner === owner) live.retire()
+
   const token = state.nextToken++
   store.addSegment(
     Object.freeze({
@@ -1025,14 +1043,16 @@ function setFooterSegment(
   )
   let disposed = false
   let ledgerApplied = false
+  let silent = false
   let ownerCleanup: (() => unknown) | undefined
   const dispose = () => {
     if (disposed) return
     disposed = true
-    if (store.clearSegmentIf(normalized, token, owner) && ledgerApplied) {
+    if (state.segments.get(normalized)?.dispose === dispose) state.segments.delete(normalized)
+    if (store.clearSegmentIf(normalized, token, owner) && ledgerApplied && !silent) {
       caller.get('tuiEffectLedger')?.record(
         { operation: 'release', resource: { kind: 'status', id: normalized }, result: 'applied' },
-        identity,
+        identity ?? caller,
       )
     }
     const cleanup = ownerCleanup
@@ -1043,6 +1063,12 @@ function setFooterSegment(
     ownerCleanup = cleanup
   })
   if (!bound) return undefined
+  state.segments.set(normalized, {
+    owner,
+    signature,
+    dispose,
+    retire: () => { silent = true; dispose() },
+  })
   caller.get('tuiEffectLedger')?.record(
     {
       operation: had ? 'replace' : 'bind',
@@ -1050,7 +1076,7 @@ function setFooterSegment(
       result: 'applied',
       ...(had ? { replaces: { resourceId: normalized } } : {}),
     },
-    identity,
+    identity ?? caller,
   )
   ledgerApplied = true
   return dispose
@@ -1060,6 +1086,18 @@ function setFooterSegment(
 interface StatusState {
   readonly store: TuiStatusStore
   nextToken: number
+  /** Live footer registrations, so an unchanged re-set is a no-op. */
+  readonly segments: Map<string, SegmentRegistration>
+}
+
+/** What a key currently holds, for the idempotence check in setSegment. */
+interface SegmentRegistration {
+  readonly owner: object
+  readonly signature: string
+  readonly dispose: () => void
+  /** Drop the previous effect binding on replace, writing no ledger record:
+   *  a replace already reports that the prior binding ended. */
+  readonly retire: () => void
 }
 
 const hostStatusStores = new WeakMap<TuiStatusRuntime, StatusState>()
