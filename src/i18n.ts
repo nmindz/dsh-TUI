@@ -701,6 +701,8 @@ const dict = {
   'load-earlier': { zh: ' ↑ 加载更早消息（会话日志完整，/export 导出全文） ', en: ' ↑ load earlier messages (full session log; /export for full text) ' },
   'show-previous-messages': { zh: ' ctrl+e 显示前 {{n}} 条消息 ', en: ' ctrl+e to show {{n}} previous messages ' },
   'resume-none-in-cwd': { zh: '当前目录没有可恢复的历史会话', en: 'No resumable sessions in the current directory' },
+  'resume-only-live-here': { zh: '当前目录的会话就是你正在进行的这个——退出后即可恢复', en: "The only conversation here is the one you are in — it is resumable once you leave it" },
+  'resume-only-live-here-n': { zh: '当前目录的 {{n}} 个会话都属于你正在进行的这条线——退出后即可恢复', en: 'All {{n}} conversations here belong to the one you are in — resumable once you leave it' },
 
   // ── screens/SessionBrowser.tsx + screens/Chat.tsx (/resume) ─────────
   'resume-resumed': { zh: '已恢复会话', en: 'Session resumed' },
