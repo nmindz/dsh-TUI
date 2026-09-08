@@ -490,6 +490,125 @@ export function extractEntries(sessionId: string, events: readonly SessionEvent[
   /** Turns whose turn/end said aborted/interrupted. */
   const abortedTurns = new Set<number>()
 
+  /** A user turn, minus goal-sourced and non-user injections. */
+  const entryFromUserMessage = (event: Extract<SessionEvent, { type: 'user/message' }>): void => {
+    const source = event.data.source as { kind: string; plugin?: string }
+    if (source.kind === 'plugin' && source.plugin === 'compact') {
+      const summary = textOf(event.data.content as readonly Block[])
+      push({
+        seq: event.seq,
+        kind: 'compact',
+        text: preview(summary || '(compaction)'),
+        searchText: `compact ${summary}`,
+        time: event.time,
+      })
+      return
+    }
+    if (source.kind !== 'user') return
+    const text = firstTextOf(event.data.content as readonly Block[])
+    if (text) {
+      push({
+        seq: event.seq,
+        kind: 'user',
+        text: preview(text),
+        searchText: `user ${text}`,
+        time: event.time,
+      })
+    }
+    return
+  }
+
+  /** A settled assistant message; supersedes its chunk-synthesized entry. */
+  const entryFromAssistantMessage = (event: Extract<SessionEvent, { type: 'assistant/message' }>): void => {
+    const { turn, step } = event.data
+    seenSteps.add(`${turn}:${step}`)
+    const text = textOf(event.data.message.content as readonly Block[])
+    // pi hides assistant messages with only tool calls (no text).
+    if (text) {
+      push({
+        seq: event.seq,
+        kind: 'assistant',
+        text: preview(text),
+        searchText: `assistant ${text}`,
+        time: event.time,
+      })
+    }
+    return
+  }
+
+  /** A streamed text delta, recorded tentatively until the message settles. */
+  const entryFromAssistantChunk = (event: Extract<SessionEvent, { type: 'assistant/chunk' }>): void => {
+    const chunk = event.data.chunk
+    if (chunk.type !== 'text-delta') return
+    const text = 'text' in chunk ? (chunk.text ?? '') : ''
+    if (!text.trim()) return
+    const key = `${event.data.turn}:${event.data.step}`
+    const index = push({
+      seq: event.seq,
+      kind: 'assistant',
+      text: preview(text),
+      searchText: `assistant ${text}`,
+      time: event.time,
+    })
+    const group = tentatives.get(key)
+    if (group === undefined) tentatives.set(key, [index])
+    else group.push(index)
+    return
+  }
+
+  /** A tool invocation, tracked open until its result arrives. */
+  const entryFromToolCall = (event: Extract<SessionEvent, { type: 'tool/call' }>): void => {
+    if (event.data.name === 'ask_user_question') return
+    const args = preview(event.data.arguments, TOOL_ARGS_PREVIEW_LIMIT)
+    const index = push({
+      seq: event.seq,
+      kind: 'tool',
+      text: `[${event.data.name}] ${args}`,
+      searchText: `tool ${event.data.name} ${event.data.arguments}`,
+      time: event.time,
+      toolStatus: 'running',
+    })
+    openTools.set(event.data.callId, index)
+    return
+  }
+
+  /** A tool result folded onto the entry its call opened. */
+  const entryFromToolResult = (event: Extract<SessionEvent, { type: 'tool/result' }>): void => {
+    const index = openTools.get(event.data.message.source.callId)
+    if (index === undefined) return
+    const entry = entries[index]!
+    entries[index] = {
+      ...entry,
+      toolStatus: event.data.error === undefined ? 'ok' : 'error',
+    }
+    openTools.delete(event.data.message.source.callId)
+    return
+  }
+
+  /** Turn teardown: interrupt/abort notices and abort bookkeeping. */
+  const entryFromTurnEnd = (event: Extract<SessionEvent, { type: 'turn/end' }>): void => {
+    const reason = event.data.reason
+    if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
+      abortedTurns.add(event.data.turn)
+      push({ seq: event.seq, kind: 'interrupt', text: 'interrupted', searchText: 'interrupt interrupted', time: event.time })
+    } else if (reason.kind !== 'completed') {
+      const detail = reason.kind === 'error' ? reason.error.message : ''
+      push({
+        seq: event.seq,
+        kind: 'notice',
+        text: preview(`turn ${reason.kind}${detail ? ` · ${detail}` : ''}`),
+        searchText: `notice turn ${reason.kind} ${detail}`,
+        time: event.time,
+      })
+    }
+    // The turn CLOSES here — including turn 0. Entries logged BETWEEN
+    // turns (a compact checkpoint) are not turn-0 entries: their rewind
+    // boundary is the entry itself, perfectly valid, so the flag must
+    // not leak past this point and get them refused as "first message".
+    inFirstTurn = false
+    return
+  }
+
   for (const event of coalesceReplayEvents(events)) {
     if (event.type === 'turn/start') {
       turnsSeen += 1
@@ -497,113 +616,24 @@ export function extractEntries(sessionId: string, events: readonly SessionEvent[
       continue
     }
     switch (event.type) {
-      case 'user/message': {
-        const source = event.data.source as { kind: string; plugin?: string }
-        if (source.kind === 'plugin' && source.plugin === 'compact') {
-          const summary = textOf(event.data.content as readonly Block[])
-          push({
-            seq: event.seq,
-            kind: 'compact',
-            text: preview(summary || '(compaction)'),
-            searchText: `compact ${summary}`,
-            time: event.time,
-          })
-          break
-        }
-        if (source.kind !== 'user') break
-        const text = firstTextOf(event.data.content as readonly Block[])
-        if (text) {
-          push({
-            seq: event.seq,
-            kind: 'user',
-            text: preview(text),
-            searchText: `user ${text}`,
-            time: event.time,
-          })
-        }
+      case 'user/message':
+        entryFromUserMessage(event)
         break
-      }
-      case 'assistant/message': {
-        const { turn, step } = event.data
-        seenSteps.add(`${turn}:${step}`)
-        const text = textOf(event.data.message.content as readonly Block[])
-        // pi hides assistant messages with only tool calls (no text).
-        if (text) {
-          push({
-            seq: event.seq,
-            kind: 'assistant',
-            text: preview(text),
-            searchText: `assistant ${text}`,
-            time: event.time,
-          })
-        }
+      case 'assistant/message':
+        entryFromAssistantMessage(event)
         break
-      }
-      case 'assistant/chunk': {
-        const chunk = event.data.chunk
-        if (chunk.type !== 'text-delta') break
-        const text = 'text' in chunk ? (chunk.text ?? '') : ''
-        if (!text.trim()) break
-        const key = `${event.data.turn}:${event.data.step}`
-        const index = push({
-          seq: event.seq,
-          kind: 'assistant',
-          text: preview(text),
-          searchText: `assistant ${text}`,
-          time: event.time,
-        })
-        const group = tentatives.get(key)
-        if (group === undefined) tentatives.set(key, [index])
-        else group.push(index)
+      case 'assistant/chunk':
+        entryFromAssistantChunk(event)
         break
-      }
-      case 'tool/call': {
-        if (event.data.name === 'ask_user_question') break
-        const args = preview(event.data.arguments, TOOL_ARGS_PREVIEW_LIMIT)
-        const index = push({
-          seq: event.seq,
-          kind: 'tool',
-          text: `[${event.data.name}] ${args}`,
-          searchText: `tool ${event.data.name} ${event.data.arguments}`,
-          time: event.time,
-          toolStatus: 'running',
-        })
-        openTools.set(event.data.callId, index)
+      case 'tool/call':
+        entryFromToolCall(event)
         break
-      }
-      case 'tool/result': {
-        const index = openTools.get(event.data.message.source.callId)
-        if (index === undefined) break
-        const entry = entries[index]!
-        entries[index] = {
-          ...entry,
-          toolStatus: event.data.error === undefined ? 'ok' : 'error',
-        }
-        openTools.delete(event.data.message.source.callId)
+      case 'tool/result':
+        entryFromToolResult(event)
         break
-      }
-      case 'turn/end': {
-        const reason = event.data.reason
-        if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
-          abortedTurns.add(event.data.turn)
-          push({ seq: event.seq, kind: 'interrupt', text: 'interrupted', searchText: 'interrupt interrupted', time: event.time })
-        } else if (reason.kind !== 'completed') {
-          const detail = reason.kind === 'error' ? reason.error.message : ''
-          push({
-            seq: event.seq,
-            kind: 'notice',
-            text: preview(`turn ${reason.kind}${detail ? ` · ${detail}` : ''}`),
-            searchText: `notice turn ${reason.kind} ${detail}`,
-            time: event.time,
-          })
-        }
-        // The turn CLOSES here — including turn 0. Entries logged BETWEEN
-        // turns (a compact checkpoint) are not turn-0 entries: their rewind
-        // boundary is the entry itself, perfectly valid, so the flag must
-        // not leak past this point and get them refused as "first message".
-        inFirstTurn = false
+      case 'turn/end':
+        entryFromTurnEnd(event)
         break
-      }
       default:
         break
     }
@@ -637,6 +667,144 @@ function titleOf(events: readonly SessionEvent[]): string | undefined {
     }
   }
   return title
+}
+
+/** The header facts the family walk reads; a structural slice of the
+ *  backend's listing header so this module stays free of persistence types. */
+export interface FamilyHeaderEntry {
+  readonly header: {
+    readonly parentSession?: string | undefined
+    readonly createdAt?: number | undefined
+  }
+}
+
+/**
+ * Walk from the live session up to its topmost known ancestor. Stops at the
+ * first parent that is unknown (outside the listing) or already visited, so a
+ * corrupt header cycle bounds the walk instead of hanging it.
+ * @returns the ancestor ids, nearest parent first.
+ */
+export function sessionAncestorChain(
+  headerById: ReadonlyMap<string, FamilyHeaderEntry>,
+  currentId: string,
+): string[] {
+  const ancestorIds: string[] = []
+  const visited = new Set<string>([currentId])
+  let cursor = headerById.get(currentId)
+  while (cursor?.header.parentSession !== undefined) {
+    const parentId = cursor.header.parentSession
+    if (visited.has(parentId)) break
+    visited.add(parentId)
+    if (!headerById.has(parentId)) break
+    ancestorIds.push(parentId)
+    cursor = headerById.get(parentId)
+  }
+  return ancestorIds
+}
+
+/**
+ * The family: the live session, its ancestor chain, and every descendant of
+ * the topmost known ancestor (siblings and cousins included).
+ *
+ * The BFS is deliberately NOT gated by family membership: ancestor-chain
+ * nodes are already in the family, and skipping them would never enumerate
+ * their other children — siblings forking off a MIDDLE ancestor would be lost.
+ */
+export function sessionFamilySet(
+  childrenByParent: ReadonlyMap<string, readonly string[]>,
+  ancestorIds: readonly string[],
+  currentId: string,
+): Set<string> {
+  const family = new Set<string>([currentId, ...ancestorIds])
+  const scanned = new Set<string>()
+  const queue = [ancestorIds.at(-1) ?? currentId]
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    if (scanned.has(id)) continue
+    scanned.add(id)
+    family.add(id)
+    for (const child of childrenByParent.get(id) ?? []) {
+      queue.push(child)
+    }
+  }
+  return family
+}
+
+/**
+ * Order the family TOPOLOGICALLY (a parent before its children): the caller's
+ * coverage bookkeeping — which seq range each chain already shows — feeds the
+ * next read's inherited-prefix skip, so a parent must be read first. Within a
+ * sibling group the live chain wins, then newest first.
+ *
+ * Cycle-broken leftovers (corrupt parent headers) are appended rather than
+ * dropped — a session missing from the tree is worse than one out of order.
+ */
+export function orderSessionFamily(
+  family: ReadonlySet<string>,
+  headerById: ReadonlyMap<string, FamilyHeaderEntry>,
+  currentId: string,
+  ancestorSet: ReadonlySet<string>,
+): string[] {
+  const priorityOf = (a: string, b: string): number => {
+    const aChain = a === currentId || ancestorSet.has(a)
+    const bChain = b === currentId || ancestorSet.has(b)
+    if (aChain !== bChain) return aChain ? -1 : 1
+    return (headerById.get(b)?.header.createdAt ?? 0) - (headerById.get(a)?.header.createdAt ?? 0)
+  }
+  const kidsOf = new Map<string, string[]>()
+  const familyRoots: string[] = []
+  for (const id of family) {
+    const parentId = headerById.get(id)?.header.parentSession
+    if (parentId !== undefined && parentId !== id && family.has(parentId)) {
+      const list = kidsOf.get(parentId)
+      if (list === undefined) kidsOf.set(parentId, [id])
+      else list.push(id)
+    } else {
+      familyRoots.push(id)
+    }
+  }
+  familyRoots.sort(priorityOf)
+  for (const list of kidsOf.values()) list.sort(priorityOf)
+  const ordered: string[] = []
+  const seen = new Set<string>()
+  const stack = [...familyRoots].reverse()
+  while (stack.length > 0) {
+    const id = stack.pop()!
+    if (seen.has(id)) continue
+    seen.add(id)
+    ordered.push(id)
+    const kids = kidsOf.get(id)
+    if (kids !== undefined) {
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]!)
+    }
+  }
+  for (const id of [...family].sort(priorityOf)) {
+    if (!seen.has(id)) ordered.push(id)
+  }
+  return ordered
+}
+
+/**
+ * Apply the session cap. The ancestor chain and the live session ALWAYS stay
+ * selected — the structural invariant (the live branch must reach the family
+ * root) outranks the cap, which therefore evicts only non-ancestors.
+ */
+export function selectFamilyWithinCap(
+  ordered: readonly string[],
+  currentId: string,
+  ancestorSet: ReadonlySet<string>,
+  maxSessions: number,
+): Set<string> {
+  const selected = new Set<string>()
+  let slots = maxSessions
+  for (const id of ordered) {
+    const chain = id === currentId || ancestorSet.has(id)
+    if (chain || slots > 0) {
+      selected.add(id)
+      if (!chain) slots -= 1
+    }
+  }
+  return selected
 }
 
 /**
@@ -673,22 +841,28 @@ export function buildSessionTree(
     if (session.parentSession !== undefined && session.seedLength === undefined) return undefined
     return session.parentSession
   }
-  for (const session of sessions) {
-    const seen = new Set<string>([session.id])
-    let cursor: FamilySession = session
-    for (;;) {
-      const parentId = parentOf(cursor)
-      if (parentId === undefined) break
-      const parent = byId.get(parentId)
-      if (parent === undefined) break
-      if (seen.has(parent.id)) {
-        cutEdges.add(cursor.id)
-        break
+  /** Cut the edge that closes each parent loop, in input order so the
+   *  surviving root is deterministic. */
+  const cutParentLoops = (): void => {
+    for (const session of sessions) {
+      const seen = new Set<string>([session.id])
+      let cursor: FamilySession = session
+      for (;;) {
+        const parentId = parentOf(cursor)
+        if (parentId === undefined) break
+        const parent = byId.get(parentId)
+        if (parent === undefined) break
+        if (seen.has(parent.id)) {
+          cutEdges.add(cursor.id)
+          break
+        }
+        seen.add(parent.id)
+        cursor = parent
       }
-      seen.add(parent.id)
-      cursor = parent
     }
   }
+
+  cutParentLoops()
 
   // Coverage bookkeeping: coveredThrough(S) = the highest K such that every
   // seq in [0..K] is displayed by S's chain or an ancestor's. A fork's
@@ -733,7 +907,11 @@ export function buildSessionTree(
   const chains = new Map<string, TreeNode[]>()
   const metas = new Map<string, SessionTreeMeta>()
   const rewindFacts = new Map<string, SessionRewindFacts>()
-  for (const session of sessions) {
+  /** Build one session's chain: its meta, rewind facts, and the node list
+   *  for the entries this session OWNS after the covered prefix is trimmed.
+   *  A session with no own entries still gets a placeholder head so the fork
+   *  structure stays visible. */
+  const buildChainFor = (session: FamilySession): void => {
     metas.set(session.id, {
       title: titleOf(session.events),
       createdAt: session.createdAt,
@@ -785,7 +963,7 @@ export function buildSessionTree(
       chains.set(session.id, [
         { id: `${session.id}:head`, entry: null, sessionId: session.id, branchHead: true, children: [] },
       ])
-      continue
+      return
     }
     chains.set(
       session.id,
@@ -798,6 +976,8 @@ export function buildSessionTree(
       })),
     )
   }
+
+  for (const session of sessions) buildChainFor(session)
   // Linear links first: node[i].children = [node[i+1]].
   for (const chain of chains.values()) {
     for (let i = 0; i + 1 < chain.length; i++) {
@@ -892,7 +1072,9 @@ export function buildSessionTree(
   const activePath = new Set<string>()
   let activeLeafId: string | null = null
   const liveChain = chains.get(liveSessionId)
-  if (liveChain !== undefined) {
+  /** Mark the live chain and, walking up, every ancestor entry the live
+   *  branch still displays (bounded by each fork's inherited cut). */
+  const markActivePath = (liveChain: TreeNode[]): void => {
     activeLeafId = liveChain.at(-1)!.id
     for (const node of liveChain) activePath.add(node.id)
     const visited = new Set<string>([liveSessionId])
@@ -911,6 +1093,8 @@ export function buildSessionTree(
       current = byId.get(parentId)
     }
   }
+
+  if (liveChain !== undefined) markActivePath(liveChain)
 
   return { roots, activePath, activeLeafId, sessions: metas, rewindFacts, truncated, sessionCount: sessions.length }
 }

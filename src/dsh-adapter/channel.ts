@@ -50,7 +50,11 @@ import {
   buildSessionTree,
   forkTarget,
   liveTailWindow,
+  orderSessionFamily,
   rewindTarget,
+  selectFamilyWithinCap,
+  sessionAncestorChain,
+  sessionFamilySet,
   turnUserText,
   type FamilySession,
   type SessionTreeData,
@@ -3999,64 +4003,108 @@ export function createChannel(
     }
   }
 
+  /** The planMode service shape this surface reads; optional at runtime. */
+  type PlanModeService = { get?(a: Agent): { active: boolean; pending?: boolean } } | undefined
+
+  /**
+   * Capture the pre-plan sandbox/approval bundle (and the durable preset
+   * identity, when authoritative) BEFORE any permission canonicalization can
+   * append replacement events.
+   */
+  const capturePrePlanModes = (session: Agent['session']): void => {
+    const previous = modePermissions(snapshotLiveSessionEvents(session))
+    const sandbox = ctx.get('sandboxPolicy') as { defaultMode?: SessionModeSpec['sandbox'] } | undefined
+    const approval = ctx.get('approval') as { effectivePolicy?(session: Agent['session']): SessionModeSpec['approval'] } | undefined
+    const base = previous.sandbox === undefined && previous.approval === undefined ? sessionModes[0] : undefined
+    previous.sandbox ??= sandbox?.defaultMode ?? base?.sandbox
+    previous.approval ??= approval?.effectivePolicy?.(session) ?? base?.approval
+    prePlanModes.set(session, previous)
+    const remembered = rememberPrePlanIdentity(session)
+    if (remembered !== undefined) prePlanPermissionIdentity.set(session, remembered)
+    else prePlanPermissionIdentity.delete(session)
+    // Persist missing defaults before /plan, so resume can recover them.
+    applyModeAtoms(previous)
+  }
+
+  /**
+   * Permission identity is applied before plan and atom changes. Dynamic
+   * presets use the official command path (or the service write fallback)
+   * and are confirmed by event / registry readback; the TUI never
+   * manufactures permission events.
+   * @returns false when the mode switch must abort.
+   */
+  const applyModePermission = async (spec: SessionModeSpec, session: Agent['session']): Promise<boolean> => {
+    if (spec.permission !== undefined) return applyPermissionIdentity(spec.permission)
+    // Static modes own a canonical permission identity. Leaving any OTHER
+    // durable identity behind (third-party preset OR a stale canonical,
+    // e.g. plan left `read-only` while atoms were restored to
+    // workspace-write) would make a static mode appear selected only
+    // because its sandbox/approval bundle happens to match, and would let
+    // the durable identity lie about the real policy. Canonicalize BEFORE
+    // applying atoms; when no canonical preset exists for the target
+    // bundle, fail closed with a visible notice.
+    const currentPermission = foldPermissionPreset(snapshotLiveSessionEvents(session))
+    if (currentPermission === undefined || currentPermission === PERMISSION_PRESET_CUSTOM) return true
+    const canonical = canonicalPermissionForMode(spec)
+    if (canonical === undefined) {
+      ctx.logger.warn(`dsh-tui: static mode "${spec.id}" cannot safely clear permission identity "${currentPermission}"`)
+      state.notify(t('mode-permission-no-canonical', { name: modeDisplayName(spec) }), { color: 'warning' })
+      return false
+    }
+    if (canonical === currentPermission) return true
+    return applyPermissionIdentity(canonical)
+  }
+
+  /**
+   * Drive the registry `plan` command for an explicit plan toggle. The
+   * bookkeeping in `finally` runs on every exit path, aborts included.
+   * @returns false when the mode switch must abort.
+   */
+  const runPlanToggle = async (
+    spec: SessionModeSpec,
+    session: Agent['session'],
+    planMode: PlanModeService,
+  ): Promise<boolean> => {
+    if (!spec.plan) {
+      // An explicit switch away from plan owns its target mode; the
+      // remembered pre-plan identity no longer applies.
+      explicitPlanExits.add(session)
+      prePlanPermissionIdentity.delete(session)
+    }
+    try {
+      const execution = await executeRegistryCommand('plan', spec.plan ? '' : ' off')
+      if (session !== agent.session) return false
+      if (execution === undefined) {
+        state.notify(t('mode-plan-unavailable'), { color: 'warning' })
+        return false
+      }
+      if (execution.kind === 'error') {
+        if (execution.text !== '') state.notify(execution.text, { color: 'error' })
+        return false
+      }
+      return true
+    } finally {
+      if (session === agent.session) {
+        const pending = planMode?.get?.(agent).pending
+        if (!foldPlanActive(snapshotLiveSessionEvents(session)) || pending !== false) explicitPlanExits.delete(session)
+        if (!foldPlanActive(snapshotLiveSessionEvents(session)) && pending !== true) prePlanModes.delete(session)
+      }
+    }
+  }
+
   /** Apply the configured atoms; an explicit exit owns its target mode. */
   const applyMode = async (spec: SessionModeSpec): Promise<void> => {
     const session = agent.session
     pendingPlanExitRestores.delete(session)
-    const planMode = ctx.get('planMode') as
-      | { get?(a: Agent): { active: boolean; pending?: boolean } }
-      | undefined
+    const planMode = ctx.get('planMode') as PlanModeService
     const planActive = foldPlanActive(snapshotLiveSessionEvents(session))
     const planChange = spec.plan !== undefined && (planMode?.get?.(agent).pending ?? planActive) !== spec.plan
     if (planChange && commandService?.find(agent, 'plan') === undefined) {
       state.notify(t('mode-plan-unavailable'), { color: 'warning' })
       return
     }
-    // Capture the pre-plan sandbox/approval bundle (and the durable preset
-    // identity, when authoritative) BEFORE any permission canonicalization
-    // can append replacement events.
-    if (planChange && spec.plan && !planActive && !prePlanModes.has(session)) {
-      const previous = modePermissions(snapshotLiveSessionEvents(session))
-      const sandbox = ctx.get('sandboxPolicy') as { defaultMode?: SessionModeSpec['sandbox'] } | undefined
-      const approval = ctx.get('approval') as { effectivePolicy?(session: Agent['session']): SessionModeSpec['approval'] } | undefined
-      const base = previous.sandbox === undefined && previous.approval === undefined ? sessionModes[0] : undefined
-      previous.sandbox ??= sandbox?.defaultMode ?? base?.sandbox
-      previous.approval ??= approval?.effectivePolicy?.(session) ?? base?.approval
-      prePlanModes.set(session, previous)
-      const remembered = rememberPrePlanIdentity(session)
-      if (remembered !== undefined) prePlanPermissionIdentity.set(session, remembered)
-      else prePlanPermissionIdentity.delete(session)
-      // Persist missing defaults before /plan, so resume can recover them.
-      applyModeAtoms(previous)
-    }
-    // Permission identity is applied before plan and atom changes. Dynamic
-    // presets use the official command path (or the service write fallback)
-    // and are confirmed by event / registry readback; the TUI never
-    // manufactures permission events.
-    if (spec.permission !== undefined) {
-      if (!(await applyPermissionIdentity(spec.permission))) return
-    } else {
-      // Static modes own a canonical permission identity. Leaving any OTHER
-      // durable identity behind (third-party preset OR a stale canonical,
-      // e.g. plan left `read-only` while atoms were restored to
-      // workspace-write) would make a static mode appear selected only
-      // because its sandbox/approval bundle happens to match, and would let
-      // the durable identity lie about the real policy. Canonicalize BEFORE
-      // applying atoms; when no canonical preset exists for the target
-      // bundle, fail closed with a visible notice.
-      const currentPermission = foldPermissionPreset(snapshotLiveSessionEvents(session))
-      if (currentPermission !== undefined && currentPermission !== PERMISSION_PRESET_CUSTOM) {
-        const canonical = canonicalPermissionForMode(spec)
-        if (canonical === undefined) {
-          ctx.logger.warn(`dsh-tui: static mode "${spec.id}" cannot safely clear permission identity "${currentPermission}"`)
-          state.notify(t('mode-permission-no-canonical', { name: modeDisplayName(spec) }), { color: 'warning' })
-          return
-        }
-        if (canonical !== currentPermission) {
-          if (!(await applyPermissionIdentity(canonical))) return
-        }
-      }
-    }
+    if (planChange && spec.plan && !planActive && !prePlanModes.has(session)) capturePrePlanModes(session)
+    if (!(await applyModePermission(spec, session))) return
     // Reconcile a stale explicit-exit marker before acting. The marker only
     // legitimately survives while a deferred exit awaits its plan/mode:false
     // (foldPlanActive && pending === false). If plan is still logged active
@@ -4066,32 +4114,7 @@ export function createChannel(
     if (planActive && planMode?.get?.(agent).pending === undefined) {
       explicitPlanExits.delete(session)
     }
-    if (planChange) {
-      if (!spec.plan) {
-        // An explicit switch away from plan owns its target mode; the
-        // remembered pre-plan identity no longer applies.
-        explicitPlanExits.add(session)
-        prePlanPermissionIdentity.delete(session)
-      }
-      try {
-        const execution = await executeRegistryCommand('plan', spec.plan ? '' : ' off')
-        if (session !== agent.session) return
-        if (execution === undefined) {
-          state.notify(t('mode-plan-unavailable'), { color: 'warning' })
-          return
-        }
-        if (execution.kind === 'error') {
-          if (execution.text !== '') state.notify(execution.text, { color: 'error' })
-          return
-        }
-      } finally {
-        if (session === agent.session) {
-          const pending = planMode?.get?.(agent).pending
-          if (!foldPlanActive(snapshotLiveSessionEvents(session)) || pending !== false) explicitPlanExits.delete(session)
-          if (!foldPlanActive(snapshotLiveSessionEvents(session)) && pending !== true) prePlanModes.delete(session)
-        }
-      }
-    }
+    if (planChange && !(await runPlanToggle(spec, session, planMode))) return
     applyModeAtoms(spec)
     refreshMode()
     state.notify(t('mode-switched', { name: modeDisplayName(state.mode) }))
@@ -5175,7 +5198,9 @@ export function createChannel(
         })
       }
       // Family = the live session's ancestor chain PLUS every descendant of
-      // its topmost known ancestor (siblings and cousins included).
+      // its topmost known ancestor (siblings and cousins included). The graph
+      // walks are pure — they live in sessionTree.ts beside the model they
+      // feed, so this method keeps only the IO and the budget bookkeeping.
       const childrenByParent = new Map<string, string[]>()
       for (const entry of local) {
         if (entry.header.parentSession === undefined) continue
@@ -5183,89 +5208,14 @@ export function createChannel(
         if (list === undefined) childrenByParent.set(entry.header.parentSession, [entry.header.id])
         else list.push(entry.header.id)
       }
-      const ancestorIds: string[] = []
-      {
-        const visited = new Set<string>([currentId])
-        let cursor = headerById.get(currentId)
-        while (cursor?.header.parentSession !== undefined) {
-          const parentId = cursor.header.parentSession
-          if (visited.has(parentId)) break
-          visited.add(parentId)
-          if (!headerById.has(parentId)) break
-          ancestorIds.push(parentId)
-          cursor = headerById.get(parentId)
-        }
-      }
-      // BFS from the topmost ancestor. The scan must NOT be gated by family
-      // membership: ancestor-chain nodes are already in the family, and
-      // skipping them here would never enumerate their other children —
-      // siblings/cousins forking off a MIDDLE ancestor would be lost.
-      const family = new Set<string>([currentId, ...ancestorIds])
-      {
-        const scanned = new Set<string>()
-        const queue = [ancestorIds.at(-1) ?? currentId]
-        while (queue.length > 0) {
-          const id = queue.shift()!
-          if (scanned.has(id)) continue
-          scanned.add(id)
-          family.add(id)
-          for (const child of childrenByParent.get(id) ?? []) {
-            queue.push(child)
-          }
-        }
-      }
-      // Processing order is TOPOLOGICAL (a parent before its children): the
-      // coverage bookkeeping below — which seq range each chain already
-      // shows — feeds the next read's inherited-prefix skip, so a parent
-      // must be read before its forks. Within each sibling group the live
-      // chain wins, then newest first (the same priority the read budget
-      // always had).
+      const ancestorIds = sessionAncestorChain(headerById, currentId)
+      const family = sessionFamilySet(childrenByParent, ancestorIds, currentId)
       const ancestorSet = new Set(ancestorIds)
-      const priorityOf = (a: string, b: string): number => {
-        const aChain = a === currentId || ancestorSet.has(a)
-        const bChain = b === currentId || ancestorSet.has(b)
-        if (aChain !== bChain) return aChain ? -1 : 1
-        return (headerById.get(b)?.header.createdAt ?? 0) - (headerById.get(a)?.header.createdAt ?? 0)
-      }
-      const kidsOf = new Map<string, string[]>()
-      const familyRoots: string[] = []
-      for (const id of family) {
-        const parentId = headerById.get(id)?.header.parentSession
-        if (parentId !== undefined && parentId !== id && family.has(parentId)) {
-          const list = kidsOf.get(parentId)
-          if (list === undefined) kidsOf.set(parentId, [id])
-          else list.push(id)
-        } else {
-          familyRoots.push(id)
-        }
-      }
-      familyRoots.sort(priorityOf)
-      for (const list of kidsOf.values()) list.sort(priorityOf)
-      const ordered: string[] = []
-      {
-        const seen = new Set<string>()
-        const stack = [...familyRoots].reverse()
-        while (stack.length > 0) {
-          const id = stack.pop()!
-          if (seen.has(id)) continue
-          seen.add(id)
-          ordered.push(id)
-          const kids = kidsOf.get(id)
-          if (kids !== undefined) {
-            for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]!)
-          }
-        }
-        // Cycle-broken leftovers (corrupt parent headers) — never drop one.
-        for (const id of [...family].sort(priorityOf)) {
-          if (!seen.has(id)) ordered.push(id)
-        }
-      }
-      // Caps: the ancestor chain + live session ALWAYS stay selected — the
-      // structural invariant (the live branch must reach the family root)
-      // outranks the session cap, which therefore evicts only non-ancestors.
-      // The event budget bounds the READ cost too: non-live logs decode
-      // lazily and stop at the remaining budget (see below), the live
-      // session keeps only its tail.
+      const ordered = orderSessionFamily(family, headerById, currentId, ancestorSet)
+      // Caps: the ancestor chain + live session ALWAYS stay selected (see
+      // selectFamilyWithinCap). The event budget bounds the READ cost too:
+      // non-live logs decode lazily and stop at the remaining budget (see
+      // below), the live session keeps only its tail.
       const MAX_TREE_SESSIONS = 24
       const MAX_TREE_EVENTS = 200_000
       // The event budget alone does NOT bound read cost: skipped envelopes
@@ -5278,15 +5228,7 @@ export function createChannel(
       // applies, so one flood cannot starve every later sibling either.
       const MAX_TREE_SCANNED = defaultMaxScanned(MAX_TREE_EVENTS)
       let scanBudget = MAX_TREE_SCANNED
-      const selected = new Set<string>()
-      let slots = MAX_TREE_SESSIONS
-      for (const id of ordered) {
-        const chain = id === currentId || ancestorSet.has(id)
-        if (chain || slots > 0) {
-          selected.add(id)
-          if (!chain) slots -= 1
-        }
-      }
+      const selected = selectFamilyWithinCap(ordered, currentId, ancestorSet, MAX_TREE_SESSIONS)
       // The live session's events come from memory (its header may not be
       // materialized yet — the jsonl backend writes on first append).
       const liveHeader = headerById.get(currentId)
@@ -5304,121 +5246,193 @@ export function createChannel(
       // ancestors covered, so a fork of a dead branch dedups against the
       // grandparent instead of hiding its self-contained history.
       const coveredThrough = new Map<string, number>()
-      for (const id of ordered) {
-        if (!selected.has(id)) continue
-        const entry = headerById.get(id)
-        if (id === currentId) {
-          const liveParentId = liveHeader?.header.parentSession ?? liveListed.parentSession
-          const liveParent = liveParentId !== undefined ? String(liveParentId) : undefined
-          const liveEvents = snapshotLiveSessionEvents(liveSession)
-          const remaining = Math.max(0, MAX_TREE_EVENTS - eventBudget)
-          // The live session's in-memory log is SELF-CONTAINED: a fork's
-          // events still carry the inherited seed prefix, which the parent's
-          // chain already displays (and already charged to the budget).
-          // Skipping it exactly like the non-live reads do keeps a live fork
-          // of a huge parent from spending the whole family budget on
-          // duplicated history and evicting its own siblings.
-          const liveSeed = liveHeader?.header.seedLength ?? liveListed.seedLength
-          // A recorded parent without an exact cut is not a usable coverage
-          // edge: the pure tree detaches it, so forwarding the parent's range
-          // here would let descendants skip history no root displays.
-          const parentCovered = liveParent !== undefined && liveSeed !== undefined
-            ? (coveredThrough.get(liveParent) ?? -1)
-            : -1
-          const skipBelow =
-            liveParent !== undefined && liveSeed !== undefined
-              ? Math.min(liveSeed, parentCovered + 1)
-              : 0
-          const own = skipBelow > 0
-            ? liveEvents.filter(event => event.seq >= skipBelow || event.type === 'session/title')
-            : liveEvents
-          // A live session larger than the remaining budget keeps its TAIL,
-          // aligned to whole turns (sessionTree.liveTailWindow): leftover
-          // entries of a turn whose turn/start was cut away render as
-          // selectable rows that can never rewind; a window holding no
-          // turn/start at all (one oversized LAST turn spans the budget)
-          // retries over the earlier complete turns instead of blacking the
-          // session out. Rewind itself never reads this copy (rewindToNode
-          // forks the real session), so the slice only narrows what the tree
-          // can display.
-          const events = liveTailWindow(own, remaining)
-          // Charge the KEPT tail, not the in-memory length: extraction only
-          // ever touches `events`, and charging the full log would black out
-          // every other family member's budget behind a discarded prefix.
-          eventBudget += events.length
-          if (events.length !== own.length) truncated = true
-          familySessions.push({
-            id,
-            createdAt: liveHeader?.header.createdAt ?? liveListed.createdAt ?? Date.now(),
-            ...(liveParent !== undefined ? { parentSession: liveParent } : {}),
-            ...(liveHeader?.header.seedLength !== undefined || liveListed.seedLength !== undefined
-              ? { seedLength: liveHeader?.header.seedLength ?? liveListed.seedLength }
-              : {}),
-            events,
-            live: true,
-            // The in-memory log always reaches the tip (liveTailWindow trims
-            // the head only), so the adopt/warning UX facts are derivable.
-            tailComplete: true,
-          })
-          // A kept tail cut off the front connects to nothing — coverage
-          // stays at the parent's (a fork of the live session re-reads the
-          // hidden prefix from its own log).
-          const firstKept = events.length > 0 ? events[0]!.seq : Number.POSITIVE_INFINITY
-          const lastKept = events.length > 0 ? events[events.length - 1]!.seq : -1
-          coveredThrough.set(
-            id,
-            firstKept <= parentCovered + 1 ? Math.max(parentCovered, lastKept) : parentCovered,
-          )
-          continue
+      // Each family member is collected by one of two branches below. They
+      // close over the running budgets (event, scan), the truncation flag and
+      // the coverage map: those are one shared admission state walked in
+      // topological order, so a copy passed by parameter would let a later
+      // sibling read against a budget an earlier one already spent.
+
+      /** The live session: events come from memory, its header may not be
+       *  materialized yet (the jsonl backend writes on first append). */
+      const collectLiveSession = (id: string): void => {
+        const liveParentId = liveHeader?.header.parentSession ?? liveListed.parentSession
+        const liveParent = liveParentId !== undefined ? String(liveParentId) : undefined
+        const liveEvents = snapshotLiveSessionEvents(liveSession)
+        const remaining = Math.max(0, MAX_TREE_EVENTS - eventBudget)
+        // The live session's in-memory log is SELF-CONTAINED: a fork's
+        // events still carry the inherited seed prefix, which the parent's
+        // chain already displays (and already charged to the budget).
+        // Skipping it exactly like the non-live reads do keeps a live fork
+        // of a huge parent from spending the whole family budget on
+        // duplicated history and evicting its own siblings.
+        const liveSeed = liveHeader?.header.seedLength ?? liveListed.seedLength
+        // A recorded parent without an exact cut is not a usable coverage
+        // edge: the pure tree detaches it, so forwarding the parent's range
+        // here would let descendants skip history no root displays.
+        const parentCovered = liveParent !== undefined && liveSeed !== undefined
+          ? (coveredThrough.get(liveParent) ?? -1)
+          : -1
+        const skipBelow =
+          liveParent !== undefined && liveSeed !== undefined
+            ? Math.min(liveSeed, parentCovered + 1)
+            : 0
+        const own = skipBelow > 0
+          ? liveEvents.filter(event => event.seq >= skipBelow || event.type === 'session/title')
+          : liveEvents
+        // A live session larger than the remaining budget keeps its TAIL,
+        // aligned to whole turns (sessionTree.liveTailWindow): leftover
+        // entries of a turn whose turn/start was cut away render as
+        // selectable rows that can never rewind; a window holding no
+        // turn/start at all (one oversized LAST turn spans the budget)
+        // retries over the earlier complete turns instead of blacking the
+        // session out. Rewind itself never reads this copy (rewindToNode
+        // forks the real session), so the slice only narrows what the tree
+        // can display.
+        const events = liveTailWindow(own, remaining)
+        // Charge the KEPT tail, not the in-memory length: extraction only
+        // ever touches `events`, and charging the full log would black out
+        // every other family member's budget behind a discarded prefix.
+        eventBudget += events.length
+        if (events.length !== own.length) truncated = true
+        familySessions.push({
+          id,
+          createdAt: liveHeader?.header.createdAt ?? liveListed.createdAt ?? Date.now(),
+          ...(liveParent !== undefined ? { parentSession: liveParent } : {}),
+          ...(liveHeader?.header.seedLength !== undefined || liveListed.seedLength !== undefined
+            ? { seedLength: liveHeader?.header.seedLength ?? liveListed.seedLength }
+            : {}),
+          events,
+          live: true,
+          // The in-memory log always reaches the tip (liveTailWindow trims
+          // the head only), so the adopt/warning UX facts are derivable.
+          tailComplete: true,
+        })
+        // A kept tail cut off the front connects to nothing — coverage
+        // stays at the parent's (a fork of the live session re-reads the
+        // hidden prefix from its own log).
+        const firstKept = events.length > 0 ? events[0]!.seq : Number.POSITIVE_INFINITY
+        const lastKept = events.length > 0 ? events[events.length - 1]!.seq : -1
+        coveredThrough.set(
+          id,
+          firstKept <= parentCovered + 1 ? Math.max(parentCovered, lastKept) : parentCovered,
+        )
+      }
+
+      /**
+       * Ask the backend where one session's artifact lives. Only the jsonl
+       * kind enters the compat file layer — a foreign kind's artifact is the
+       * backend's own format, read through inspect instead.
+       */
+      const locateJsonlArtifact = (
+        entry: { header: RawSessionHeader; raw: unknown } | undefined,
+      ): { hasLocate: boolean; locatedPath: string | undefined } => {
+        const locate = persistence.locate
+        const hasLocate = typeof locate === 'function'
+        if (!hasLocate || entry === undefined) return { hasLocate, locatedPath: undefined }
+        try {
+          const location: unknown = locate.call(persistence, entry.raw)
+          if (location !== null && typeof location === 'object') {
+            const record = location as { kind?: unknown; path?: unknown }
+            if (record.kind === 'jsonl' && typeof record.path === 'string') {
+              return { hasLocate, locatedPath: record.path }
+            }
+          }
+        } catch {
+          // Best effort — a locate hiccup falls through to inspect.
         }
+        return { hasLocate, locatedPath: undefined }
+      }
+
+      /**
+       * Alpha.4 deliberately omits the inherited cut from logical list
+       * headers. Resolve it only for the SELECTED family node currently being
+       * read: JSONL keeps the exact physical `seedLength`; non-file backends
+       * expose the cut on inspect instead. Never scan every listed session,
+       * and never infer it from an end-seed marker or log length.
+       */
+      const resolveInheritedCut = (
+        id: string,
+        entry: { header: RawSessionHeader; raw: unknown } | undefined,
+        parentId: string | undefined,
+        hasLocate: boolean,
+        locatedPath: string | undefined,
+      ): number | undefined => {
+        if (parentId === undefined) return undefined
+        const recorded = readInheritedCut(entry?.raw)
+        if (recorded !== undefined) return recorded
+        if (locatedPath !== undefined) return readPhysicalHeaderSeedLength(locatedPath)
+        return hasLocate ? undefined : readPhysicalHeaderSeedLengthForSession(id)
+      }
+
+      /**
+       * The file-backed half of the source precedence, all read-only:
+       *
+       *  1. `persistence.locate` — the backend's OWN artifact resolution is
+       *     authoritative (custom root, workspace-key scheme). When it names
+       *     a path, ONLY that file is read: falling back to a same-id copy
+       *     under the stock root could surface a STALE log from another
+       *     backend configuration. A locate miss or an ABSENT file leaves
+       *     `events` undefined so the caller can try inspect.
+       *  2. Stock root scan — only for backends WITHOUT locate (fakes, older
+       *     custom implementations).
+       *
+       * A `failed` read (safety cap, corruption) must NOT escalate to
+       * inspect, which parses the whole log up front — the caller degrades to
+       * a placeholder instead. Charges what it scanned to the tree budget.
+       */
+      const readFamilyLogFromFiles = (
+        id: string,
+        hasLocate: boolean,
+        locatedPath: string | undefined,
+        remaining: number,
+        skipBelow: number,
+      ): {
+        events: readonly SessionEvent[] | undefined
+        complete: boolean
+        failed: boolean
+        readFrom: number
+      } => {
+        const miss = { events: undefined, complete: true, failed: false, readFrom: 0 }
+        // Per-log scan allowance: the usual 4×-of-remaining derivation,
+        // clamped to what the tree-level scan budget still has.
+        const scanAllowance = Math.min(defaultMaxScanned(remaining), scanBudget)
+        const read = hasLocate
+          ? (locatedPath === undefined
+              ? undefined
+              : readSessionEventsFromFile(locatedPath, remaining, scanAllowance, skipBelow))
+          : readSessionEventsFromLog(id, remaining, scanAllowance, skipBelow)
+        if (read === undefined) return miss
+        scanBudget -= read.scanned
+        if (read.failed === true) return { ...miss, failed: true }
+        return { events: read.events, complete: read.complete, failed: false, readFrom: skipBelow }
+      }
+
+      /** One persisted family member: locate, read under budget, or degrade
+       *  to a placeholder that keeps the branch structure visible. */
+      const collectPersistedSession = async (
+        id: string,
+        entry: { header: RawSessionHeader; raw: unknown } | undefined,
+      ): Promise<void> => {
         const header = entry?.header
         const parentId = header?.parentSession
         const structuralParentCovered = parentId !== undefined ? (coveredThrough.get(parentId) ?? -1) : -1
-        const locate = persistence.locate
-        const hasLocate = typeof locate === 'function'
-        let locatedPath: string | undefined
-        if (hasLocate && entry !== undefined) {
-          try {
-            const location: unknown = locate.call(persistence, entry.raw)
-            // Only the jsonl kind enters the compat file layer — a foreign
-            // kind's artifact is the backend's own format (inspect below).
-            if (location !== null && typeof location === 'object') {
-              const record = location as { kind?: unknown; path?: unknown }
-              if (record.kind === 'jsonl' && typeof record.path === 'string') {
-                locatedPath = record.path
-              }
-            }
-          } catch {
-            // Best effort — a locate hiccup falls through to inspect.
-          }
+        const { hasLocate, locatedPath } = locateJsonlArtifact(entry)
+        let inheritedCut = resolveInheritedCut(id, entry, parentId, hasLocate, locatedPath)
+        /**
+         * Derive the coverage pair from a cut. Structural ancestry stays
+         * separate from proven dedup coverage: the model layer detaches a
+         * parent edge whose exact cut is unavailable, so treating that edge
+         * as covered would hide a child's prefix under a parent root that no
+         * longer owns it. And the skip never passes the seed prefix — events
+         * beyond it are this session's OWN, which no ancestor can show; a
+         * parent that was never read covers nothing (skip 0).
+         */
+        const coverageFor = (cut: number | undefined): { covered: number; skip: number } => {
+          const covered = parentId !== undefined && cut !== undefined ? structuralParentCovered : -1
+          const skip = parentId !== undefined && cut !== undefined ? Math.min(cut, covered + 1) : 0
+          return { covered, skip }
         }
-        // Alpha.4 deliberately omits the inherited cut from logical list
-        // headers. Resolve it only for the SELECTED family node currently
-        // being read: JSONL keeps the exact physical `seedLength`; non-file
-        // backends expose the cut on inspect below. Never scan every listed
-        // session and never infer it from an end-seed marker or log length.
-        let inheritedCut = parentId === undefined ? undefined : readInheritedCut(entry?.raw)
-        if (parentId !== undefined && inheritedCut === undefined) {
-          inheritedCut = locatedPath !== undefined
-            ? readPhysicalHeaderSeedLength(locatedPath)
-            : !hasLocate
-                ? readPhysicalHeaderSeedLengthForSession(id)
-                : undefined
-        }
-        // Keep structural ancestry separate from proven dedup coverage. The
-        // model layer detaches a parent edge whose exact cut is unavailable;
-        // treating that edge as covered here would hide a child's prefix
-        // under a parent root that no longer owns it.
-        let parentCovered = parentId !== undefined && inheritedCut !== undefined
-          ? structuralParentCovered
-          : -1
-        // Never skip past the seed prefix: events beyond it are this
-        // session's OWN — no ancestor can show them. A parent that was never
-        // read (evicted, or outside the family) covers nothing (skip 0).
-        let skipBelow =
-          parentId !== undefined && inheritedCut !== undefined
-            ? Math.min(inheritedCut, parentCovered + 1)
-            : 0
+        let { covered: parentCovered, skip: skipBelow } = coverageFor(inheritedCut)
         let facts: FamilySession = {
           id,
           createdAt: header?.createdAt ?? 0,
@@ -5434,7 +5448,7 @@ export function createChannel(
           truncated = true
           familySessions.push({ ...facts, events: [], live: false, unloaded: true })
           coveredThrough.set(id, parentCovered)
-          continue
+          return
         }
         // Read-only, tolerant, bounded: the compat reader decodes frames
         // lazily and stops at the remaining event budget. Browsing the tree
@@ -5460,50 +5474,22 @@ export function createChannel(
         //     would re-read unboundedly exactly the logs the caps exist to
         //     bound (64 MiB frames, decode bombs) — degrade to a placeholder
         //     instead.
-        let events: readonly SessionEvent[] | undefined
-        let complete = true
-        let failed = false
+        const fromFiles = readFamilyLogFromFiles(id, hasLocate, locatedPath, remaining, skipBelow)
+        let events = fromFiles.events
+        let complete = fromFiles.complete
+        const failed = fromFiles.failed
         // First seq the chosen source actually covers: the file readers start
         // at the inherited-prefix skip, inspect always hands the whole log.
-        let readFrom = 0
-        // Per-log scan allowance: the usual 4×-of-remaining derivation,
-        // clamped to what the tree-level scan budget still has.
-        const scanAllowance = Math.min(defaultMaxScanned(remaining), scanBudget)
-        if (hasLocate) {
-          if (locatedPath !== undefined) {
-            const viaPath = readSessionEventsFromFile(locatedPath, remaining, scanAllowance, skipBelow)
-            if (viaPath !== undefined) {
-              scanBudget -= viaPath.scanned
-              if (viaPath.failed === true) failed = true
-              else {
-                events = viaPath.events
-                complete = viaPath.complete
-                readFrom = skipBelow
-              }
-            }
-          }
-        } else if (!hasLocate) {
-          const read = readSessionEventsFromLog(id, remaining, scanAllowance, skipBelow)
-          if (read !== undefined) {
-            scanBudget -= read.scanned
-            if (read.failed === true) failed = true
-            else {
-              events = read.events
-              complete = read.complete
-              readFrom = skipBelow
-            }
-          }
-        }
+        let readFrom = fromFiles.readFrom
         if (!failed && events === undefined && typeof persistence.inspect === 'function') {
           try {
             const inspection = await persistence.inspect(SessionId(id))
             const inspectedCut = readInheritedCut(inspection)
             if (parentId !== undefined && inheritedCut === undefined && inspectedCut !== undefined) {
               inheritedCut = inspectedCut
-              parentCovered = structuralParentCovered
-              skipBelow = parentId !== undefined
-                ? Math.min(inheritedCut, parentCovered + 1)
-                : 0
+              const rederived = coverageFor(inheritedCut)
+              parentCovered = rederived.covered
+              skipBelow = rederived.skip
               facts = { ...facts, seedLength: inheritedCut }
             }
             // inspect parses the WHOLE log up front: charge the full length
@@ -5532,7 +5518,7 @@ export function createChannel(
           // against the grandparent instead of hiding its own history.
           familySessions.push({ ...facts, events: [], live: false, unreadable: true })
           coveredThrough.set(id, parentCovered)
-          continue
+          return
         }
         eventBudget += events.length
         if (!complete) truncated = true
@@ -5545,6 +5531,16 @@ export function createChannel(
           id,
           readFrom <= parentCovered + 1 ? Math.max(parentCovered, lastRead) : parentCovered,
         )
+      }
+
+      for (const id of ordered) {
+        if (!selected.has(id)) continue
+        const entry = headerById.get(id)
+        if (id === currentId) {
+          collectLiveSession(id)
+          continue
+        }
+        await collectPersistedSession(id, entry)
       }
       // A session swap mid-build invalidates the whole assembly (it mixes
       // the snapshot's lineage with headers listed for the OLD cwd state):
@@ -8713,6 +8709,619 @@ ${output}
     }
   }
 
+  /** A user turn: typed text, goal-sourced notices and staged images. */
+  const renderUserMessageEvent = (event: Extract<SessionEvent, { type: 'user/message' }>): void => {
+    // Compaction checkpoint: `source = { kind: 'plugin', plugin:
+    // 'compact' }` (dsh-compact's COMPACT_CHECKPOINT_SOURCE). The TUI shows
+    // the framed summary after /compact; render it as a Divider title +
+    // a summary row that defaults folded (`compact` kind) instead of
+    // skipping it like other injected context.
+    if (
+      event.data.source.kind === 'plugin' &&
+      event.data.source.plugin === 'compact'
+    ) {
+      const summary = textOf(event.data.content)
+      state.rows.push({ id: nextRowId, kind: 'notice', text: 'Session summary is ready' })
+      nextRowId += 1
+      if (summary) {
+        state.rows.push({ id: nextRowId, kind: 'compact', text: summary })
+        nextRowId += 1
+      }
+      // The surface replace drops the whole pre-compact history: reset
+      // the context accounting NOW so the status bar (ctx bar, tokens,
+      // context-low warning) drops immediately instead of waiting for
+      // the next request's usage event.
+      const removed =
+        state.contextSegments.prompt +
+        state.contextSegments.assistant +
+        state.contextSegments.thinking +
+        state.contextSegments.tools
+      const summaryTokens = estimateTokens(summary)
+      state.tokens.input = Math.max(0, state.tokens.input - removed) + summaryTokens
+      state.contextSegments = {
+        system: state.contextSegments.system,
+        prompt: summaryTokens,
+        assistant: 0,
+        thinking: 0,
+        tools: 0,
+      }
+      state.lastUsage = {
+        input: state.contextSegments.system + summaryTokens,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      }
+      contextWarned = false
+      return
+    }
+    // Same-session goal domain: goal-sourced messages are the round
+    // driver's continuation prompts (positive rounds advance the
+    // counter); some hosts also inline the durable snapshot in a
+    // round-zero source. They are not transcript bubbles — they drive
+    // the goal panel's live projection (replayed on resume/rewind like
+    // every other event; the snapshot itself arrives as the top-level
+    // `goal/change` event admitted above).
+    if ((event.data.source as { kind: string }).kind === 'goal') {
+      applyGoalEvent(event)
+      return
+    }
+    // Injected context (plugin/skill source) is not a human bubble; v1
+    // renders direct human prompts only.
+    if (event.data.source.kind !== 'user') return
+    const text = firstTextOf(event.data.content)
+    const images = transcriptImages(event.data.content)
+    if (text || images.length > 0) {
+      state.rows.push({
+        id: nextRowId,
+        kind: 'user',
+        text,
+        ...(images.length === 0 ? {} : { images }),
+        seq: event.seq,
+      })
+      state.lastUserText = text || t('transcript-image-message', { count: images.length })
+      // The context estimate counts everything sent to the model —
+      // typed text AND the `@`-mention attachment blocks.
+      state.contextSegments.prompt += estimateTokens(textOf(event.data.content))
+      nextRowId += 1
+    }
+    return
+  }
+
+  /** Streaming deltas: assistant text and reasoning, plus TPS sampling. */
+  const renderAssistantChunkEvent = (event: Extract<SessionEvent, { type: 'assistant/chunk' }>): void => {
+    if (handledAssistantChunks.has(event.seq)) return
+    handledAssistantChunks.add(event.seq)
+    const chunk = event.data.chunk
+    if (chunk.type === 'text-delta') {
+      if (chunk.text) {
+        // Fold the thinking preview while it is still in the live
+        // window (see foldLiveReasoning) — before this text grows the
+        // transcript and pushes the block into scrollback.
+        foldLiveReasoning('first text token')
+        const key = stepKey(event.data.turn, event.data.step)
+        const row = assistantRowsByStep.get(key) ?? ensureStreaming(event.seq)
+        assistantRowsByStep.set(key, row)
+        streaming = row
+        row.streaming = true
+        const before = row.text.length
+        appendTextDelta(row, chunk.text)
+        state.responseChars += Math.max(0, row.text.length - before)
+      }
+    } else if (chunk.type === 'reasoning-delta') {
+      if (chunk.text) {
+        const row = ensureReasoning(event.seq, event.data.turn, event.data.step)
+        appendTextDelta(row, chunk.text)
+      }
+    }
+    const step = tpsStep
+    if (
+      step !== undefined &&
+      step.turn === event.data.turn &&
+      step.step === event.data.step &&
+      isTokenDelta(chunk)
+    ) {
+      step.firstTokenTime ??= event.time
+      step.outputChars += tokenDeltaChars(chunk)
+      const elapsedMs = Math.max(0, event.time - step.firstTokenTime)
+      if (elapsedMs > 500) {
+        const decodeMs = tpsTurnDecodeMs + elapsedMs
+        const outputTokens = tpsTurnDecodeTokens + Math.ceil(step.outputChars / 4)
+        state.tps = outputTokens / (decodeMs / 1000)
+      }
+    }
+    updateSpinnerMode()
+    return
+  }
+
+  /** Token, cache and peak/idle accounting for one settled message. */
+  const foldAssistantUsage = (event: Extract<SessionEvent, { type: 'assistant/message' }>): void => {
+    const usage = event.data.usage
+    if (usage !== undefined) {
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
+      state.tokens.input += usage.inputTokens ?? 0
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
+      state.tokens.output += usage.outputTokens ?? 0
+      // Cache split totals feed the session cost estimate (hit-priced
+      // input vs. uncached input) — the durable replay may lack them.
+      state.tokens.cacheRead += usage.cacheReadTokens ?? 0
+      state.tokens.cacheWrite += usage.cacheWriteTokens ?? 0
+      // Peak/idle bucketing by the request's own time (the durable replay
+      // replays historical events, so a resumed session prices each
+      // request at the rate window it actually ran in — the session cost
+      // estimate never prices the whole session at the current window).
+      {
+        const bucket = isPeakHour(new Date(event.time))
+          ? state.tokens.peak
+          : state.tokens.idle
+        bucket.input += usage.inputTokens ?? 0
+        bucket.output += usage.outputTokens ?? 0
+        bucket.cacheRead += usage.cacheReadTokens ?? 0
+        bucket.cacheWrite += usage.cacheWriteTokens ?? 0
+      }
+      // The most recent request's usage describes the CURRENT context:
+      // input (uncached) + cache hits all occupy the window. Cache hits
+      // also drive the status-line `cache N` readout.
+      state.lastUsage = {
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
+        input: usage.inputTokens ?? 0,
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
+        output: usage.outputTokens ?? 0,
+        cacheRead: usage.cacheReadTokens ?? 0,
+        cacheWrite: usage.cacheWriteTokens ?? 0,
+      }
+    }
+  }
+
+  /** Close the step's TPS sample once its message settles. The step handle
+   *  is passed in: the caller clears it, so reading it here would race. */
+  const sampleAssistantTps = (
+    event: Extract<SessionEvent, { type: 'assistant/message' }>,
+    tpsMessageStep: typeof tpsStep,
+  ): void => {
+    const usage = event.data.usage
+    if (
+      tpsTurn === event.data.turn &&
+      tpsMessageStep !== undefined &&
+      tpsMessageStep.turn === event.data.turn &&
+      tpsMessageStep.step === event.data.step &&
+      tpsMessageStep.firstTokenTime !== undefined
+    ) {
+      const outputTokens = usageOutputTokens(usage)
+        ?? (tpsMessageStep.outputChars > 0
+          ? Math.ceil(tpsMessageStep.outputChars / 4)
+          : undefined)
+      if (outputTokens !== undefined) {
+        tpsTurnDecodeMs += Math.max(0, event.time - tpsMessageStep.firstTokenTime)
+        tpsTurnDecodeTokens += outputTokens
+        tpsTurnSampled = true
+        if (tpsTurnDecodeMs > 0) {
+          state.tps = tpsTurnDecodeTokens / (tpsTurnDecodeMs / 1000)
+        }
+      }
+    }
+    if (
+      tpsMessageStep !== undefined &&
+      tpsMessageStep.turn === event.data.turn &&
+      tpsMessageStep.step === event.data.step
+    ) {
+      tpsStep = undefined
+    }
+  }
+
+  /** Context-bar segmentation (pi-nano-context style): assistant text and
+   *  tool calls in the assistant segment, thinking separately. */
+  const segmentAssistantContext = (event: Extract<SessionEvent, { type: 'assistant/message' }>): void => {
+    // Context-bar segmentation (pi-nano-context style): assistant text
+    // and tool calls in the assistant segment, thinking separately.
+    for (const block of event.data.message.content) {
+      if (block.type === 'text' && block.text) {
+        state.contextSegments.assistant += estimateTokens(block.text)
+      } else if (block.type === 'reasoning' && block.text) {
+        state.contextSegments.thinking += estimateTokens(block.text)
+      }
+    }
+  }
+
+  /** The settled assistant message: rows, reasoning fold, usage and TPS. */
+  const renderAssistantMessageEvent = (event: Extract<SessionEvent, { type: 'assistant/message' }>): void => {
+    if (handledAssistantMessages.has(event.seq)) return
+    handledAssistantMessages.add(event.seq)
+    const text = textOf(event.data.message.content)
+    const images = transcriptImages(event.data.message.content)
+    // Replay without chunk deltas (prepareReplayEvents drops settled
+    // ones): rebuild the reasoning row from the sealed message's
+    // reasoning blocks. Replay-only — gated on the `replaying` flag,
+    // not on `reasoning === undefined`: a live stream's chunks already
+    // created the row, and foldLiveReasoning has cleared the `reasoning`
+    // handle by the time this event lands, so the undefined check alone
+    // would rebuild a duplicate thinking block per step. Pushed BEFORE
+    // the assistant row so the transcript order matches the live
+    // stream; settled (folded) immediately, durationMs unknown without
+    // a live clock.
+    if (replaying && reasoning === undefined) {
+      const reasoningText = event.data.message.content
+        .map(block => (block.type === 'reasoning' ? block.text : ''))
+        .join('')
+      if (reasoningText !== '') {
+        state.rows.push({
+          id: nextRowId,
+          kind: 'reasoning',
+          text: reasoningText,
+          seq: event.seq,
+        })
+        nextRowId += 1
+      }
+    }
+    // Reasoning/tool-only steps emit no text: creating an assistant row
+    // anyway leaves an empty `●` bullet in the transcript. A pre-existing
+    // streaming row always has text (ensureStreaming is only reached on
+    // non-empty text deltas), so only create one when text arrives.
+    // Key the step→row ledger only when the event carries a durable
+    // turn/step; a message without them must never collide onto a
+    // previous step's row (a bare `undefined:undefined` key would make
+    // every turn/step-less message reuse the FIRST one's assistant row).
+    const msgTurn = event.data.turn
+    const msgStep = event.data.step
+    const msgKey = msgTurn !== undefined && msgStep !== undefined
+      ? stepKey(msgTurn, msgStep)
+      : undefined
+    const row = (msgKey !== undefined ? assistantRowsByStep.get(msgKey) : undefined) ?? streaming ??
+      (text || images.length > 0
+        ? ([...state.rows].reverse().find(candidate =>
+            candidate.kind === 'assistant' && candidate.seq === event.seq,
+          ) ?? ensureStreaming(event.seq))
+        : undefined)
+    if (row !== undefined) {
+      if (msgKey !== undefined) assistantRowsByStep.set(msgKey, row)
+      row.time = event.time
+      if (text) row.text = text
+      row.images = images.length === 0 ? undefined : images
+      row.streaming = false
+      // Live settles keep the smooth-reveal cursor alive (a one-shot
+      // non-streaming delivery still paints as a flow); replayed
+      // settles must not — the transcript would typewrite on open.
+      if (!replaying && text) row.fresh = true
+    }
+    streaming = undefined
+    if (reasoning !== undefined) {
+      // Backstop fold: reasoning whose step ended with no text token
+      // and no tool call (foldLiveReasoning handles those earlier —
+      // while the block is still in the repaintable live window;
+      // here a long reply may already have pushed it into scrollback,
+      // where the shrink cannot be repainted). `full` mode
+      // (/settings opt-in) keeps the block expanded until turn settle
+      // — settleStreaming folds the sealed rows then.
+      reasoning.durationMs = Math.max(0, Date.now() - reasoningStart)
+      if (state.thinkingFold === 'preview') reasoning.streaming = false
+      sealedReasoning.push(reasoning)
+      logForDebugging(`thinking: step sealed (${reasoning.durationMs}ms), expanded until turn/end`)
+    }
+    reasoning = undefined
+    updateSpinnerMode()
+    const tpsMessageStep = tpsStep
+    foldAssistantUsage(event)
+    sampleAssistantTps(event, tpsMessageStep)
+    segmentAssistantContext(event)
+    return
+  }
+
+  /** A tool invocation: its card, and subagent task bookkeeping. */
+  const renderToolCallEvent = (event: Extract<SessionEvent, { type: 'tool/call' }>): void => {
+    // The ask-user-question tool renders as the interactive questionnaire
+    // panel (DSH user-interaction seam), not as a tool card: the model is
+    // parked waiting for the human, so no running card, no active-tool
+    // spinner, no args noise in the transcript. The Q&A summary is pushed
+    // by the TUI once the batch is answered; tool/result for a call with
+    // no card is a no-op below.
+    if (event.data.name === 'ask_user_question') return
+    // The Task tool's plain card is replaced by the live subagent card
+    // (Kimi Code semantics): the delegation itself renders as a subagent
+    // row, so the raw args/result card would only duplicate it. The call
+    // still runs - only its transcript rendering is suppressed.
+    if (isSubagentToolName(event.data.name)) {
+      try {
+        const args = JSON.parse(event.data.arguments) as { description?: unknown }
+        if (typeof args.description === 'string' && args.description) pendingTaskDescriptions.push(args.description)
+      } catch {
+        // Unparseable args leave the queue untouched; the card falls back
+        // to the provider label.
+      }
+      return
+    }
+    // Reasoning that led to a tool call is done thinking — fold the
+    // preview now, before the tool card grows the transcript past it
+    // (see foldLiveReasoning).
+    foldLiveReasoning('tool call')
+    const card: ChatRow = {
+      id: nextRowId,
+      kind: 'tool',
+      text: '',
+      seq: event.seq,
+      // Smooth-reveal participation flag: live cards animate their body
+      // in; replayed cards (resume/rewind) paint complete.
+      fresh: !replaying,
+      tool: {
+        callId: event.data.callId,
+        name: event.data.name,
+        argsText: preview(event.data.arguments, ARGS_PREVIEW_LIMIT),
+        argsFull: event.data.arguments,
+        status: 'running',
+        callView: presentCallView(event.data.name, event.data.arguments),
+        startedAt: Date.now(),
+      },
+    }
+    nextRowId += 1
+    toolCards.set(event.data.callId, card)
+    state.rows.push(card)
+    state.activeToolCount += 1
+    state.contextSegments.assistant += estimateTokens(
+      `${event.data.name}${event.data.arguments}`,
+    )
+    updateSpinnerMode()
+    return
+  }
+
+  /** A tool result folded onto its call card, jobs included. */
+  const renderToolResultEvent = (event: Extract<SessionEvent, { type: 'tool/result' }>): void => {
+    const card = toolCards.get(event.data.message.source.callId)
+    if (card !== undefined && card.tool !== undefined) {
+      const images = transcriptImages(event.data.message.content)
+      card.images = images.length === 0 ? undefined : images
+      card.tool.durationMs = Math.max(0, Date.now() - card.tool.startedAt)
+      const failure = event.data.error
+      if (failure !== undefined) {
+        card.tool.status = 'error'
+        const errorText = toolErrorText(event)
+        card.tool.errorText = errorText
+        state.contextSegments.tools += estimateTokens(errorText)
+      } else {
+        card.tool.status = 'ok'
+        const block = event.data.message.content[0]
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable session data may not match type
+        const result = block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
+        card.tool.resultFull = result || undefined
+        card.tool.resultText = result ? preview(result, RESULT_PREVIEW_LIMIT) : undefined
+        // The tool's own settled-state view (applied diff, terminal
+        // output, read content…) wins over the raw text body. argsFull
+        // pairs the args: live cards are never folded, so it is intact.
+        card.tool.resultView = presentResultView(card.tool.name, card.tool.argsFull ?? '', event.data)
+        state.contextSegments.tools += estimateTokens(result)
+        // A job_output result doubles as the job card's output feed:
+        // the registry's read() is consuming and reserved for the
+        // owning agent, so the UI mirrors the tail that already streams
+        // through the transcript instead of polling the job itself.
+        if (card.tool.name === 'job_output' && result !== '') {
+          const id = parseJobOutputId(card.tool.argsFull)
+          if (id !== undefined) jobStore.onOutputSeen(id, result, event.time ?? Date.now())
+        }
+        // A `started background job <id>` ack pairs the job with its
+        // tool call: capture the FULL command from the args (the
+        // registry label is the friendly description) for the panel.
+        const startAck = BACKGROUND_START_ACK.exec(result)
+        if (startAck !== null) {
+          const command = toolCommandOf(card.tool.argsFull)
+          if (command !== undefined) jobStore.onStarted(startAck[1], command)
+        }
+      }
+      state.activeToolCount = Math.max(0, state.activeToolCount - 1)
+      // The card is settled: no later event looks it up by callId, so
+      // drop the index entry. The card itself stays in state.rows
+      // (bounded by MAX_ROWS + foldRows, which also drops the full
+      // args/result payloads of folded cards).
+      toolCards.delete(event.data.message.source.callId)
+      updateSpinnerMode()
+    }
+    return
+  }
+
+  /** Turn teardown: TPS sample, completion/abort handling, activity. */
+  const renderTurnEndEvent = (event: Extract<SessionEvent, { type: 'turn/end' }>): void => {
+    cancelInFlight = false
+    state.cancelPending = false
+    settleStreaming()
+    state.working = false
+    state.activeToolCount = 0
+    if (tpsTurn !== undefined && tpsTurn === event.data.turn) {
+      if (tpsTurnSampled && tpsTurnDecodeMs > 0) {
+        const turnTps = tpsTurnDecodeTokens / (tpsTurnDecodeMs / 1000)
+        state.tps = turnTps
+        state.tpsSamples.push({ tps: turnTps, at: event.time })
+        if (state.tpsSamples.length > 500) state.tpsSamples.shift()
+      } else {
+        // Do not leave a chars/4 live estimate behind when no completed
+        // decode sample exists for this turn.
+        state.tps = tpsBeforeTurn
+      }
+      tpsTurn = undefined
+      tpsStep = undefined
+      tpsTurnDecodeMs = 0
+      tpsTurnDecodeTokens = 0
+      tpsTurnSampled = false
+    }
+    const reason = event.data.reason
+    if (reason.kind === 'completed') {
+      checkContextWarning()
+      return
+    }
+    if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
+      // `Agent.cancel()` closes the turn as `aborted`; `interrupted`
+      // only appears for crash-orphaned turns. The renderer presents both
+      // user-interruption paths as a distinct dim row.
+      state.rows.push({
+        id: nextRowId,
+        kind: 'interrupt',
+        text: t('interrupted-by-user') + t('interrupted-ask-next'),
+      })
+      nextRowId += 1
+      return
+    }
+    // The notice renders as a single-line Divider title: error.message
+    // can carry newlines/control chars, and an embedded \n splits the
+    // rule across rows. cleanRenderText is the render-path single-line
+    // contract (sessionTree's preview() folds likewise for the tree).
+    const detail = reason.kind === 'error' ? cleanRenderText(reason.error.message, NOTICE_CELLS) : ''
+    state.rows.push({ id: nextRowId, kind: 'notice', text: `turn ${reason.kind}${detail ? ` · ${detail}` : ''}` })
+    nextRowId += 1
+    // The transcript notice above is history and must paint on replay.
+    // The toast is not: it announces something that just happened, so
+    // firing it while replaying re-raises every failure the session ever
+    // recorded as if it were live — a /resume of a session that once hit
+    // a provider 529 pops "Turn error · Overloaded" with nothing wrong.
+    if (!replaying) {
+      state.notify(
+        t('turn-failed', { detail: detail ? ` · ${detail}` : '' }),
+        { color: 'error', timeoutMs: 8000 },
+      )
+    }
+    return
+  }
+
+  /** Open a TPS step sample for the running turn. */
+  const renderStepStartEvent = (event: Extract<SessionEvent, { type: 'step/start' }>): void => {
+    if (tpsTurn === event.data.turn) {
+      tpsStep = {
+        turn: event.data.turn,
+        step: event.data.step,
+        firstTokenTime: undefined,
+        outputChars: 0,
+      }
+    }
+    return
+  }
+
+  /** Close the TPS step sample when its step ends. */
+  const renderStepEndEvent = (event: Extract<SessionEvent, { type: 'step/end' }>): void => {
+    if (
+      tpsStep !== undefined &&
+      tpsStep.turn === event.data.turn &&
+      tpsStep.step === event.data.step
+    ) {
+      tpsStep = undefined
+    }
+    return
+  }
+
+  /** Turn setup: spinner, working flags and a fresh TPS fold. */
+  const renderTurnStartEvent = (event: Extract<SessionEvent, { type: 'turn/start' }>): void => {
+    cancelInFlight = false
+    state.cancelPending = false
+    state.working = true
+    state.turnStart = Date.now()
+    state.responseChars = 0
+    state.spinnerMode = 'requesting'
+    // Keep the prior turn visible until this turn produces a measurable
+    // decode span, while starting a fresh weighted step fold.
+    tpsBeforeTurn = state.tps
+    tpsTurn = event.data.turn
+    tpsTurnDecodeMs = 0
+    tpsTurnDecodeTokens = 0
+    tpsTurnSampled = false
+    tpsStep = undefined
+    return
+  }
+
+  /** Adapter-advertised context capacity; drives the context-low warning. */
+  const renderRequestContextEvent = (event: Extract<SessionEvent, { type: 'request/context' }>): void => {
+    // Adapter-advertised context capacity; drives the context-low
+    // warning when the route reports one.
+    if (event.data.contextWindow !== undefined) {
+      state.contextWindow = event.data.contextWindow
+    }
+    return
+  }
+
+  /** Call config readout: reasoning effort, and the system segment size. */
+  const renderRequestHeaderEvent = (event: Extract<SessionEvent, { type: 'request/header' }>): void => {
+    // Reasoning effort readout (status line): the header carries the
+    // conversation's call config (provider/model/effort/sampling). The
+    // system prompt text seeds the context bar's system segment.
+    // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable session data may lack header config
+    const effort = event.data.header.config?.reasoningEffort
+    if (typeof effort === 'string') {
+      state.reasoningEffort = effort
+    }
+    if (typeof event.data.header.system === 'string') {
+      state.contextSegments.system = estimateTokens(event.data.header.system)
+    }
+    return
+  }
+
+  /** The durable session title. */
+  const renderSessionTitleEvent = (event: Extract<SessionEvent, { type: 'session/title' }>): void => {
+    state.sessionTitle = event.data.title
+    return
+  }
+
+  /**
+   * Events outside dsh-session's typed union: plugin-defined types matched
+   * by name (todo/write, agent-preset/selected, session/color) and, last,
+   * anything a registered tuiRenderers seam can turn into rows.
+   */
+  const renderUntypedEvent = (event: SessionEvent): void => {
+    // dsh-tool-todo owns this optional module augmentation on the 0.1.2 line.
+    // Match by name so the TUI remains loadable without that plugin.
+    if ((event as { type: string }).type === 'todo/write') {
+      const todos = todoPanelItems((event as unknown as { data?: unknown }).data)
+      if (todos !== undefined) state.todos = todos
+      return
+    }
+    // Logged preset switch (blank sessions only, issue #8): a transcript
+    // marker so a replayed log shows which composition produced the
+    // turns after it. Not in dsh-session's typed union — matched here by
+    // name, like the other plugin-defined events above.
+    if ((event as { type: string }).type === 'agent-preset/selected') {
+      const data = event.data as unknown as { agentPreset?: string }
+      const recordedPreset = typeof data.agentPreset === 'string' ? data.agentPreset : undefined
+      const renamedOfficialPreset =
+        (recordedPreset === 'code' && state.agentPreset === 'ptc') ||
+        (recordedPreset === 'ptc' && state.agentPreset === 'code')
+      const preset = renamedOfficialPreset && state.agentPreset !== undefined
+        ? state.agentPreset
+        : recordedPreset ?? 'unknown'
+      state.rows.push({
+        id: nextRowId,
+        kind: 'notice',
+        text: t('agent-preset-switched', { preset }),
+      })
+      nextRowId += 1
+      return
+    }
+    // `/color` accent (dsh-tui plugin event, replayed on resume/rewind
+    // like session/title): last write wins, '' clears to the default.
+    if ((event as { type: string }).type === 'session/color') {
+      const data = event.data as unknown as { color?: unknown }
+      state.sessionColor = typeof data.color === 'string' ? data.color : ''
+      return
+    }
+    // Custom plugin events (tuiRenderers seam): a registered renderer
+    // maps the payload to text rows — title as a local row, body as
+    // preview-clipped local-output rows, same shape pushLocal uses.
+    // Runs on the live stream AND on replay (resume/rewind), so the
+    // projection must stay total; the runtime isolates renderer
+    // crashes per type.
+    if (rendererRuntime !== undefined) {
+      const rendered = rendererRuntime.render(
+        (event as { type: string }).type,
+        (event as { data?: unknown }).data,
+      )
+      if (rendered !== undefined) {
+        if (rendered.title !== undefined && rendered.title !== '') {
+          state.rows.push({ id: nextRowId, kind: 'local', text: rendered.title })
+          nextRowId += 1
+        }
+        for (const line of rendered.lines) {
+          state.rows.push({
+            id: nextRowId,
+            kind: 'local-output',
+            text: preview(String(line), LOCAL_OUTPUT_LIMIT),
+          })
+          nextRowId += 1
+        }
+      }
+    }
+    return
+  }
+
   const renderEvent = (event: SessionEvent): void => {
     // Top-level `goal/change` events are how the goal service actually
     // records durable goal mutations (create/edit/pause/resume/complete/
@@ -8724,564 +9333,44 @@ ${output}
       return
     }
     switch (event.type) {
-      case 'user/message': {
-        // Compaction checkpoint: `source = { kind: 'plugin', plugin:
-        // 'compact' }` (dsh-compact's COMPACT_CHECKPOINT_SOURCE). The TUI shows
-        // the framed summary after /compact; render it as a Divider title +
-        // a summary row that defaults folded (`compact` kind) instead of
-        // skipping it like other injected context.
-        if (
-          event.data.source.kind === 'plugin' &&
-          event.data.source.plugin === 'compact'
-        ) {
-          const summary = textOf(event.data.content)
-          state.rows.push({ id: nextRowId, kind: 'notice', text: 'Session summary is ready' })
-          nextRowId += 1
-          if (summary) {
-            state.rows.push({ id: nextRowId, kind: 'compact', text: summary })
-            nextRowId += 1
-          }
-          // The surface replace drops the whole pre-compact history: reset
-          // the context accounting NOW so the status bar (ctx bar, tokens,
-          // context-low warning) drops immediately instead of waiting for
-          // the next request's usage event.
-          const removed =
-            state.contextSegments.prompt +
-            state.contextSegments.assistant +
-            state.contextSegments.thinking +
-            state.contextSegments.tools
-          const summaryTokens = estimateTokens(summary)
-          state.tokens.input = Math.max(0, state.tokens.input - removed) + summaryTokens
-          state.contextSegments = {
-            system: state.contextSegments.system,
-            prompt: summaryTokens,
-            assistant: 0,
-            thinking: 0,
-            tools: 0,
-          }
-          state.lastUsage = {
-            input: state.contextSegments.system + summaryTokens,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-          }
-          contextWarned = false
-          break
-        }
-        // Same-session goal domain: goal-sourced messages are the round
-        // driver's continuation prompts (positive rounds advance the
-        // counter); some hosts also inline the durable snapshot in a
-        // round-zero source. They are not transcript bubbles — they drive
-        // the goal panel's live projection (replayed on resume/rewind like
-        // every other event; the snapshot itself arrives as the top-level
-        // `goal/change` event admitted above).
-        if ((event.data.source as { kind: string }).kind === 'goal') {
-          applyGoalEvent(event)
-          break
-        }
-        // Injected context (plugin/skill source) is not a human bubble; v1
-        // renders direct human prompts only.
-        if (event.data.source.kind !== 'user') break
-        const text = firstTextOf(event.data.content)
-        const images = transcriptImages(event.data.content)
-        if (text || images.length > 0) {
-          state.rows.push({
-            id: nextRowId,
-            kind: 'user',
-            text,
-            ...(images.length === 0 ? {} : { images }),
-            seq: event.seq,
-          })
-          state.lastUserText = text || t('transcript-image-message', { count: images.length })
-          // The context estimate counts everything sent to the model —
-          // typed text AND the `@`-mention attachment blocks.
-          state.contextSegments.prompt += estimateTokens(textOf(event.data.content))
-          nextRowId += 1
-        }
+      case 'user/message':
+        renderUserMessageEvent(event)
         break
-      }
-      case 'step/start': {
-        if (tpsTurn === event.data.turn) {
-          tpsStep = {
-            turn: event.data.turn,
-            step: event.data.step,
-            firstTokenTime: undefined,
-            outputChars: 0,
-          }
-        }
+      case 'step/start':
+        renderStepStartEvent(event)
         break
-      }
-      case 'assistant/chunk': {
-        if (handledAssistantChunks.has(event.seq)) break
-        handledAssistantChunks.add(event.seq)
-        const chunk = event.data.chunk
-        if (chunk.type === 'text-delta') {
-          if (chunk.text) {
-            // Fold the thinking preview while it is still in the live
-            // window (see foldLiveReasoning) — before this text grows the
-            // transcript and pushes the block into scrollback.
-            foldLiveReasoning('first text token')
-            const key = stepKey(event.data.turn, event.data.step)
-            const row = assistantRowsByStep.get(key) ?? ensureStreaming(event.seq)
-            assistantRowsByStep.set(key, row)
-            streaming = row
-            row.streaming = true
-            const before = row.text.length
-            appendTextDelta(row, chunk.text)
-            state.responseChars += Math.max(0, row.text.length - before)
-          }
-        } else if (chunk.type === 'reasoning-delta') {
-          if (chunk.text) {
-            const row = ensureReasoning(event.seq, event.data.turn, event.data.step)
-            appendTextDelta(row, chunk.text)
-          }
-        }
-        const step = tpsStep
-        if (
-          step !== undefined &&
-          step.turn === event.data.turn &&
-          step.step === event.data.step &&
-          isTokenDelta(chunk)
-        ) {
-          step.firstTokenTime ??= event.time
-          step.outputChars += tokenDeltaChars(chunk)
-          const elapsedMs = Math.max(0, event.time - step.firstTokenTime)
-          if (elapsedMs > 500) {
-            const decodeMs = tpsTurnDecodeMs + elapsedMs
-            const outputTokens = tpsTurnDecodeTokens + Math.ceil(step.outputChars / 4)
-            state.tps = outputTokens / (decodeMs / 1000)
-          }
-        }
-        updateSpinnerMode()
+      case 'assistant/chunk':
+        renderAssistantChunkEvent(event)
         break
-      }
-      case 'assistant/message': {
-        if (handledAssistantMessages.has(event.seq)) break
-        handledAssistantMessages.add(event.seq)
-        const text = textOf(event.data.message.content)
-        const images = transcriptImages(event.data.message.content)
-        // Replay without chunk deltas (prepareReplayEvents drops settled
-        // ones): rebuild the reasoning row from the sealed message's
-        // reasoning blocks. Replay-only — gated on the `replaying` flag,
-        // not on `reasoning === undefined`: a live stream's chunks already
-        // created the row, and foldLiveReasoning has cleared the `reasoning`
-        // handle by the time this event lands, so the undefined check alone
-        // would rebuild a duplicate thinking block per step. Pushed BEFORE
-        // the assistant row so the transcript order matches the live
-        // stream; settled (folded) immediately, durationMs unknown without
-        // a live clock.
-        if (replaying && reasoning === undefined) {
-          const reasoningText = event.data.message.content
-            .map(block => (block.type === 'reasoning' ? block.text : ''))
-            .join('')
-          if (reasoningText !== '') {
-            state.rows.push({
-              id: nextRowId,
-              kind: 'reasoning',
-              text: reasoningText,
-              seq: event.seq,
-            })
-            nextRowId += 1
-          }
-        }
-        // Reasoning/tool-only steps emit no text: creating an assistant row
-        // anyway leaves an empty `●` bullet in the transcript. A pre-existing
-        // streaming row always has text (ensureStreaming is only reached on
-        // non-empty text deltas), so only create one when text arrives.
-        // Key the step→row ledger only when the event carries a durable
-        // turn/step; a message without them must never collide onto a
-        // previous step's row (a bare `undefined:undefined` key would make
-        // every turn/step-less message reuse the FIRST one's assistant row).
-        const msgTurn = event.data.turn
-        const msgStep = event.data.step
-        const msgKey = msgTurn !== undefined && msgStep !== undefined
-          ? stepKey(msgTurn, msgStep)
-          : undefined
-        const row = (msgKey !== undefined ? assistantRowsByStep.get(msgKey) : undefined) ?? streaming ??
-          (text || images.length > 0
-            ? ([...state.rows].reverse().find(candidate =>
-                candidate.kind === 'assistant' && candidate.seq === event.seq,
-              ) ?? ensureStreaming(event.seq))
-            : undefined)
-        if (row !== undefined) {
-          if (msgKey !== undefined) assistantRowsByStep.set(msgKey, row)
-          row.time = event.time
-          if (text) row.text = text
-          row.images = images.length === 0 ? undefined : images
-          row.streaming = false
-          // Live settles keep the smooth-reveal cursor alive (a one-shot
-          // non-streaming delivery still paints as a flow); replayed
-          // settles must not — the transcript would typewrite on open.
-          if (!replaying && text) row.fresh = true
-        }
-        streaming = undefined
-        if (reasoning !== undefined) {
-          // Backstop fold: reasoning whose step ended with no text token
-          // and no tool call (foldLiveReasoning handles those earlier —
-          // while the block is still in the repaintable live window;
-          // here a long reply may already have pushed it into scrollback,
-          // where the shrink cannot be repainted). `full` mode
-          // (/settings opt-in) keeps the block expanded until turn settle
-          // — settleStreaming folds the sealed rows then.
-          reasoning.durationMs = Math.max(0, Date.now() - reasoningStart)
-          if (state.thinkingFold === 'preview') reasoning.streaming = false
-          sealedReasoning.push(reasoning)
-          logForDebugging(`thinking: step sealed (${reasoning.durationMs}ms), expanded until turn/end`)
-        }
-        reasoning = undefined
-        updateSpinnerMode()
-        const usage = event.data.usage
-        if (usage !== undefined) {
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
-          state.tokens.input += usage.inputTokens ?? 0
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
-          state.tokens.output += usage.outputTokens ?? 0
-          // Cache split totals feed the session cost estimate (hit-priced
-          // input vs. uncached input) — the durable replay may lack them.
-          state.tokens.cacheRead += usage.cacheReadTokens ?? 0
-          state.tokens.cacheWrite += usage.cacheWriteTokens ?? 0
-          // Peak/idle bucketing by the request's own time (the durable replay
-          // replays historical events, so a resumed session prices each
-          // request at the rate window it actually ran in — the session cost
-          // estimate never prices the whole session at the current window).
-          {
-            const bucket = isPeakHour(new Date(event.time))
-              ? state.tokens.peak
-              : state.tokens.idle
-            bucket.input += usage.inputTokens ?? 0
-            bucket.output += usage.outputTokens ?? 0
-            bucket.cacheRead += usage.cacheReadTokens ?? 0
-            bucket.cacheWrite += usage.cacheWriteTokens ?? 0
-          }
-          // The most recent request's usage describes the CURRENT context:
-          // input (uncached) + cache hits all occupy the window. Cache hits
-          // also drive the status-line `cache N` readout.
-          state.lastUsage = {
-            // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
-            input: usage.inputTokens ?? 0,
-            // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack tokens
-            output: usage.outputTokens ?? 0,
-            cacheRead: usage.cacheReadTokens ?? 0,
-            cacheWrite: usage.cacheWriteTokens ?? 0,
-          }
-        }
-        const tpsMessageStep = tpsStep
-        if (
-          tpsTurn === event.data.turn &&
-          tpsMessageStep !== undefined &&
-          tpsMessageStep.turn === event.data.turn &&
-          tpsMessageStep.step === event.data.step &&
-          tpsMessageStep.firstTokenTime !== undefined
-        ) {
-          const outputTokens = usageOutputTokens(usage)
-            ?? (tpsMessageStep.outputChars > 0
-              ? Math.ceil(tpsMessageStep.outputChars / 4)
-              : undefined)
-          if (outputTokens !== undefined) {
-            tpsTurnDecodeMs += Math.max(0, event.time - tpsMessageStep.firstTokenTime)
-            tpsTurnDecodeTokens += outputTokens
-            tpsTurnSampled = true
-            if (tpsTurnDecodeMs > 0) {
-              state.tps = tpsTurnDecodeTokens / (tpsTurnDecodeMs / 1000)
-            }
-          }
-        }
-        if (
-          tpsMessageStep !== undefined &&
-          tpsMessageStep.turn === event.data.turn &&
-          tpsMessageStep.step === event.data.step
-        ) {
-          tpsStep = undefined
-        }
-        // Context-bar segmentation (pi-nano-context style): assistant text
-        // and tool calls in the assistant segment, thinking separately.
-        for (const block of event.data.message.content) {
-          if (block.type === 'text' && block.text) {
-            state.contextSegments.assistant += estimateTokens(block.text)
-          } else if (block.type === 'reasoning' && block.text) {
-            state.contextSegments.thinking += estimateTokens(block.text)
-          }
-        }
+      case 'assistant/message':
+        renderAssistantMessageEvent(event)
         break
-      }
-      case 'tool/call': {
-        // The ask-user-question tool renders as the interactive questionnaire
-        // panel (DSH user-interaction seam), not as a tool card: the model is
-        // parked waiting for the human, so no running card, no active-tool
-        // spinner, no args noise in the transcript. The Q&A summary is pushed
-        // by the TUI once the batch is answered; tool/result for a call with
-        // no card is a no-op below.
-        if (event.data.name === 'ask_user_question') break
-        // The Task tool's plain card is replaced by the live subagent card
-        // (Kimi Code semantics): the delegation itself renders as a subagent
-        // row, so the raw args/result card would only duplicate it. The call
-        // still runs - only its transcript rendering is suppressed.
-        if (isSubagentToolName(event.data.name)) {
-          try {
-            const args = JSON.parse(event.data.arguments) as { description?: unknown }
-            if (typeof args.description === 'string' && args.description) pendingTaskDescriptions.push(args.description)
-          } catch {
-            // Unparseable args leave the queue untouched; the card falls back
-            // to the provider label.
-          }
-          break
-        }
-        // Reasoning that led to a tool call is done thinking — fold the
-        // preview now, before the tool card grows the transcript past it
-        // (see foldLiveReasoning).
-        foldLiveReasoning('tool call')
-        const card: ChatRow = {
-          id: nextRowId,
-          kind: 'tool',
-          text: '',
-          seq: event.seq,
-          // Smooth-reveal participation flag: live cards animate their body
-          // in; replayed cards (resume/rewind) paint complete.
-          fresh: !replaying,
-          tool: {
-            callId: event.data.callId,
-            name: event.data.name,
-            argsText: preview(event.data.arguments, ARGS_PREVIEW_LIMIT),
-            argsFull: event.data.arguments,
-            status: 'running',
-            callView: presentCallView(event.data.name, event.data.arguments),
-            startedAt: Date.now(),
-          },
-        }
-        nextRowId += 1
-        toolCards.set(event.data.callId, card)
-        state.rows.push(card)
-        state.activeToolCount += 1
-        state.contextSegments.assistant += estimateTokens(
-          `${event.data.name}${event.data.arguments}`,
-        )
-        updateSpinnerMode()
+      case 'tool/call':
+        renderToolCallEvent(event)
         break
-      }
-      case 'tool/result': {
-        const card = toolCards.get(event.data.message.source.callId)
-        if (card !== undefined && card.tool !== undefined) {
-          const images = transcriptImages(event.data.message.content)
-          card.images = images.length === 0 ? undefined : images
-          card.tool.durationMs = Math.max(0, Date.now() - card.tool.startedAt)
-          const failure = event.data.error
-          if (failure !== undefined) {
-            card.tool.status = 'error'
-            const errorText = toolErrorText(event)
-            card.tool.errorText = errorText
-            state.contextSegments.tools += estimateTokens(errorText)
-          } else {
-            card.tool.status = 'ok'
-            const block = event.data.message.content[0]
-            // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable session data may not match type
-            const result = block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
-            card.tool.resultFull = result || undefined
-            card.tool.resultText = result ? preview(result, RESULT_PREVIEW_LIMIT) : undefined
-            // The tool's own settled-state view (applied diff, terminal
-            // output, read content…) wins over the raw text body. argsFull
-            // pairs the args: live cards are never folded, so it is intact.
-            card.tool.resultView = presentResultView(card.tool.name, card.tool.argsFull ?? '', event.data)
-            state.contextSegments.tools += estimateTokens(result)
-            // A job_output result doubles as the job card's output feed:
-            // the registry's read() is consuming and reserved for the
-            // owning agent, so the UI mirrors the tail that already streams
-            // through the transcript instead of polling the job itself.
-            if (card.tool.name === 'job_output' && result !== '') {
-              const id = parseJobOutputId(card.tool.argsFull)
-              if (id !== undefined) jobStore.onOutputSeen(id, result, event.time ?? Date.now())
-            }
-            // A `started background job <id>` ack pairs the job with its
-            // tool call: capture the FULL command from the args (the
-            // registry label is the friendly description) for the panel.
-            const startAck = BACKGROUND_START_ACK.exec(result)
-            if (startAck !== null) {
-              const command = toolCommandOf(card.tool.argsFull)
-              if (command !== undefined) jobStore.onStarted(startAck[1], command)
-            }
-          }
-          state.activeToolCount = Math.max(0, state.activeToolCount - 1)
-          // The card is settled: no later event looks it up by callId, so
-          // drop the index entry. The card itself stays in state.rows
-          // (bounded by MAX_ROWS + foldRows, which also drops the full
-          // args/result payloads of folded cards).
-          toolCards.delete(event.data.message.source.callId)
-          updateSpinnerMode()
-        }
+      case 'tool/result':
+        renderToolResultEvent(event)
         break
-      }
-      case 'step/end': {
-        if (
-          tpsStep !== undefined &&
-          tpsStep.turn === event.data.turn &&
-          tpsStep.step === event.data.step
-        ) {
-          tpsStep = undefined
-        }
+      case 'step/end':
+        renderStepEndEvent(event)
         break
-      }
-      case 'turn/start': {
-        cancelInFlight = false
-        state.cancelPending = false
-        state.working = true
-        state.turnStart = Date.now()
-        state.responseChars = 0
-        state.spinnerMode = 'requesting'
-        // Keep the prior turn visible until this turn produces a measurable
-        // decode span, while starting a fresh weighted step fold.
-        tpsBeforeTurn = state.tps
-        tpsTurn = event.data.turn
-        tpsTurnDecodeMs = 0
-        tpsTurnDecodeTokens = 0
-        tpsTurnSampled = false
-        tpsStep = undefined
+      case 'turn/start':
+        renderTurnStartEvent(event)
         break
-      }
-      case 'turn/end': {
-        cancelInFlight = false
-        state.cancelPending = false
-        settleStreaming()
-        state.working = false
-        state.activeToolCount = 0
-        if (tpsTurn !== undefined && tpsTurn === event.data.turn) {
-          if (tpsTurnSampled && tpsTurnDecodeMs > 0) {
-            const turnTps = tpsTurnDecodeTokens / (tpsTurnDecodeMs / 1000)
-            state.tps = turnTps
-            state.tpsSamples.push({ tps: turnTps, at: event.time })
-            if (state.tpsSamples.length > 500) state.tpsSamples.shift()
-          } else {
-            // Do not leave a chars/4 live estimate behind when no completed
-            // decode sample exists for this turn.
-            state.tps = tpsBeforeTurn
-          }
-          tpsTurn = undefined
-          tpsStep = undefined
-          tpsTurnDecodeMs = 0
-          tpsTurnDecodeTokens = 0
-          tpsTurnSampled = false
-        }
-        const reason = event.data.reason
-        if (reason.kind === 'completed') {
-          checkContextWarning()
-          break
-        }
-        if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
-          // `Agent.cancel()` closes the turn as `aborted`; `interrupted`
-          // only appears for crash-orphaned turns. The renderer presents both
-          // user-interruption paths as a distinct dim row.
-          state.rows.push({
-            id: nextRowId,
-            kind: 'interrupt',
-            text: t('interrupted-by-user') + t('interrupted-ask-next'),
-          })
-          nextRowId += 1
-          break
-        }
-        // The notice renders as a single-line Divider title: error.message
-        // can carry newlines/control chars, and an embedded \n splits the
-        // rule across rows. cleanRenderText is the render-path single-line
-        // contract (sessionTree's preview() folds likewise for the tree).
-        const detail = reason.kind === 'error' ? cleanRenderText(reason.error.message, NOTICE_CELLS) : ''
-        state.rows.push({ id: nextRowId, kind: 'notice', text: `turn ${reason.kind}${detail ? ` · ${detail}` : ''}` })
-        nextRowId += 1
-        // The transcript notice above is history and must paint on replay.
-        // The toast is not: it announces something that just happened, so
-        // firing it while replaying re-raises every failure the session ever
-        // recorded as if it were live — a /resume of a session that once hit
-        // a provider 529 pops "Turn error · Overloaded" with nothing wrong.
-        if (!replaying) {
-          state.notify(
-            t('turn-failed', { detail: detail ? ` · ${detail}` : '' }),
-            { color: 'error', timeoutMs: 8000 },
-          )
-        }
+      case 'turn/end':
+        renderTurnEndEvent(event)
         break
-      }
       case 'request/context':
-        // Adapter-advertised context capacity; drives the context-low
-        // warning when the route reports one.
-        if (event.data.contextWindow !== undefined) {
-          state.contextWindow = event.data.contextWindow
-        }
+        renderRequestContextEvent(event)
         break
-      case 'request/header': {
-        // Reasoning effort readout (status line): the header carries the
-        // conversation's call config (provider/model/effort/sampling). The
-        // system prompt text seeds the context bar's system segment.
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable session data may lack header config
-        const effort = event.data.header.config?.reasoningEffort
-        if (typeof effort === 'string') {
-          state.reasoningEffort = effort
-        }
-        if (typeof event.data.header.system === 'string') {
-          state.contextSegments.system = estimateTokens(event.data.header.system)
-        }
+      case 'request/header':
+        renderRequestHeaderEvent(event)
         break
-      }
       case 'session/title':
-        state.sessionTitle = event.data.title
+        renderSessionTitleEvent(event)
         break
       default:
-        // dsh-tool-todo owns this optional module augmentation on the 0.1.2 line.
-        // Match by name so the TUI remains loadable without that plugin.
-        if ((event as { type: string }).type === 'todo/write') {
-          const todos = todoPanelItems((event as unknown as { data?: unknown }).data)
-          if (todos !== undefined) state.todos = todos
-          break
-        }
-        // Logged preset switch (blank sessions only, issue #8): a transcript
-        // marker so a replayed log shows which composition produced the
-        // turns after it. Not in dsh-session's typed union — matched here by
-        // name, like the other plugin-defined events above.
-        if ((event as { type: string }).type === 'agent-preset/selected') {
-          const data = event.data as unknown as { agentPreset?: string }
-          const recordedPreset = typeof data.agentPreset === 'string' ? data.agentPreset : undefined
-          const renamedOfficialPreset =
-            (recordedPreset === 'code' && state.agentPreset === 'ptc') ||
-            (recordedPreset === 'ptc' && state.agentPreset === 'code')
-          const preset = renamedOfficialPreset && state.agentPreset !== undefined
-            ? state.agentPreset
-            : recordedPreset ?? 'unknown'
-          state.rows.push({
-            id: nextRowId,
-            kind: 'notice',
-            text: t('agent-preset-switched', { preset }),
-          })
-          nextRowId += 1
-          break
-        }
-        // `/color` accent (dsh-tui plugin event, replayed on resume/rewind
-        // like session/title): last write wins, '' clears to the default.
-        if ((event as { type: string }).type === 'session/color') {
-          const data = event.data as unknown as { color?: unknown }
-          state.sessionColor = typeof data.color === 'string' ? data.color : ''
-          break
-        }
-        // Custom plugin events (tuiRenderers seam): a registered renderer
-        // maps the payload to text rows — title as a local row, body as
-        // preview-clipped local-output rows, same shape pushLocal uses.
-        // Runs on the live stream AND on replay (resume/rewind), so the
-        // projection must stay total; the runtime isolates renderer
-        // crashes per type.
-        if (rendererRuntime !== undefined) {
-          const rendered = rendererRuntime.render(
-            (event as { type: string }).type,
-            (event as { data?: unknown }).data,
-          )
-          if (rendered !== undefined) {
-            if (rendered.title !== undefined && rendered.title !== '') {
-              state.rows.push({ id: nextRowId, kind: 'local', text: rendered.title })
-              nextRowId += 1
-            }
-            for (const line of rendered.lines) {
-              state.rows.push({
-                id: nextRowId,
-                kind: 'local-output',
-                text: preview(String(line), LOCAL_OUTPUT_LIMIT),
-              })
-              nextRowId += 1
-            }
-          }
-        }
+        renderUntypedEvent(event)
         break
     }
   }
@@ -10005,8 +10094,9 @@ export async function expandMentions(
   let budget = MENTION_MAX_TOTAL_CHARS
   let imageCount = 0
   let imageBytes = 0
+  type Mention = (typeof mentions)[number]
   type ExpansionReference =
-    | { kind: 'mention'; start: number; mention: (typeof mentions)[number] }
+    | { kind: 'mention'; start: number; mention: Mention }
     | { kind: 'staged-image'; start: number; token: string; attachment: MentionImageBlock['attachment'] }
   const references: ExpansionReference[] = fs === undefined
     ? []
@@ -10029,57 +10119,190 @@ export async function expandMentions(
   }
   references.sort((a, b) => a.start - b.start)
 
-  // `@image` files and staged `[Image #N]` capabilities share one admission
-  // queue. The earliest reference in the user's text wins both the per-
-  // message count and byte budgets, and image blocks preserve that order.
-  for (const reference of references) {
-    if (reference.kind === 'staged-image') {
-      const { attachment, token } = reference
-      // A referenced-but-dropped staged image must be loud: silently sending
-      // the bare token would leave the user believing the image reached the
-      // model. Reuse the missing-mention warning channel.
-      if (attachments === undefined) {
-        missing.push(token)
-        continue
+  // The admission branches below close over the accumulators above rather
+  // than taking them as arguments: the text budget, the image counters and
+  // the block list are one running admission state shared across references,
+  // so passing copies would let one branch decide against a stale budget.
+
+  /** A staged `[Image #N]` capability: admit it, or report the token missing. */
+  const admitStagedImage = (token: string, attachment: MentionImageBlock['attachment']): void => {
+    // A referenced-but-dropped staged image must be loud: silently sending
+    // the bare token would leave the user believing the image reached the
+    // model. Reuse the missing-mention warning channel.
+    if (attachments === undefined) {
+      missing.push(token)
+      return
+    }
+    const limits = attachments.imageLimits
+    if (
+      imageCount >= limits.maxImagesPerMessage
+      || imageBytes + attachment.bytes > limits.maxMessageImageBytes
+      || !limits.mediaTypes.includes(attachment.mediaType)
+    ) {
+      missing.push(token)
+      return
+    }
+    blocks.push({ type: 'image', attachment })
+    imageCount += 1
+    imageBytes += attachment.bytes
+  }
+
+  /** An `@mention` naming an image file, read under the shared image budget. */
+  const admitMentionImage = async (
+    display: string,
+    target: { displayPath: string },
+    imageType: MentionImageMediaType,
+    store: MentionAttachments,
+    readBytes: NonNullable<MentionFs['readBytes']>,
+  ): Promise<void> => {
+    const limits = store.imageLimits
+    if (!limits.mediaTypes.includes(imageType) || imageCount >= limits.maxImagesPerMessage) {
+      missing.push(display)
+      return
+    }
+    try {
+      const data = await readBytes(target, undefined, limits.maxImageBytes)
+      if (imageBytes + data.byteLength > limits.maxMessageImageBytes) {
+        missing.push(display)
+        return
       }
-      const limits = attachments.imageLimits
-      if (
-        imageCount >= limits.maxImagesPerMessage
-        || imageBytes + attachment.bytes > limits.maxMessageImageBytes
-        || !limits.mediaTypes.includes(attachment.mediaType)
-      ) {
-        missing.push(token)
-        continue
-      }
+      const attachment = await store.saveImage({
+        data,
+        mediaType: imageType,
+        name: basename(target.displayPath),
+      })
       blocks.push({ type: 'image', attachment })
       imageCount += 1
-      imageBytes += attachment.bytes
-      continue
+      imageBytes += data.byteLength
+      attached.push(display)
+    } catch {
+      missing.push(display)
     }
+  }
 
-    if (fs === undefined) continue
-    const { mention } = reference
+  /** The `<attached-file>` header for one mention, line suffix honoured. */
+  const attachedFileHeader = (
+    shownPath: string,
+    mention: Mention,
+    lines: readonly string[],
+  ): { header: string; slice: readonly string[] | undefined } => {
+    // Line-range slice (issue #359): 1-based inclusive. An endLine past EOF
+    // clamps to the file; a startLine past EOF falls back to the whole file
+    // with an in-band note — never a silent empty attach.
+    const startLine = mention.startLine
+    if (startLine === undefined) return { header: `<attached-file path="${shownPath}">`, slice: undefined }
+    if (startLine > lines.length) {
+      return {
+        header: `<attached-file path="${shownPath}" lines="${startLine}-${mention.endLine}" note="requested lines beyond EOF (file has ${lines.length} line${lines.length === 1 ? '' : 's'}); whole file attached">`,
+        slice: undefined,
+      }
+    }
+    const endLine = Math.min(mention.endLine ?? startLine, lines.length)
+    return {
+      header: `<attached-file path="${shownPath}" lines="${startLine}${endLine === startLine ? '' : `-${endLine}`}">`,
+      slice: lines.slice(startLine - 1, endLine),
+    }
+  }
+
+  /** An `@mention` resolving to a text file, capped by the running budget. */
+  const attachMentionFile = async (
+    source: MentionFs,
+    display: string,
+    shownPath: string,
+    target: { displayPath: string },
+    mention: Mention,
+    literalFallback: boolean,
+  ): Promise<void> => {
+    try {
+      const cap = Math.min(MENTION_MAX_FILE_CHARS, budget)
+      const content = await source.readText(target)
+      let body = content
+      let truncated = false
+      let header = `<attached-file path="${shownPath}">`
+      // Line ranges never apply to literal-fallback hits (those files really
+      // are named `…#L…`, so no suffix was typed). The split stays behind the
+      // suffix check — whole-file attaches must not pay for it.
+      if (mention.startLine !== undefined && !literalFallback) {
+        const resolved = attachedFileHeader(shownPath, mention, content.split('\n'))
+        header = resolved.header
+        if (resolved.slice !== undefined) body = resolved.slice.join('\n')
+      }
+      if (body.length > cap) {
+        body = body.slice(0, cap)
+        truncated = true
+      }
+      budget -= body.length
+      blocks.push({
+        type: 'text',
+        text: `${header}\n${body}${truncated ? '\n[… truncated]' : ''}\n</attached-file>`,
+      })
+      attached.push(display)
+    } catch {
+      // Binary/undecodable or unreadable — report it like a miss.
+      missing.push(display)
+    }
+  }
+
+  /** An `@mention` resolving to a directory: a shallow, capped listing. */
+  const attachMentionDirectory = async (
+    source: MentionFs,
+    display: string,
+    shownPath: string,
+    target: { displayPath: string },
+  ): Promise<void> => {
+    try {
+      const entries = await source.listDir(target)
+      const listing = entries
+        .slice(0, MENTION_MAX_DIR_ENTRIES)
+        .map(entry => (entry.type === 'directory' ? `${entry.name}/` : entry.name))
+      if (entries.length > MENTION_MAX_DIR_ENTRIES) {
+        listing.push(`… (${entries.length - MENTION_MAX_DIR_ENTRIES} more)`)
+      }
+      const body = listing.join('\n')
+      budget -= body.length
+      blocks.push({
+        type: 'text',
+        text: `<attached-directory path="${shownPath}">\n${body}\n</attached-directory>`,
+      })
+      attached.push(display)
+    } catch {
+      missing.push(display)
+    }
+  }
+
+  /**
+   * Resolve one mention's path against the session cwd, same as the
+   * model-facing fs tools; absolute paths pass through untouched. A
+   * `#L12-14` line suffix (issue #359) is stripped before resolution; when
+   * the stripped path misses, the typed literal (suffix intact) gets ONE
+   * fallback try so filenames genuinely containing `#L…` still resolve as
+   * whole files.
+   */
+  const resolveMentionPath = async (
+    source: MentionFs,
+    mention: Mention,
+  ): Promise<{ resolved: ResolvedMention | undefined; literalFallback: boolean }> => {
+    const absolute = isAbsolute(mention.path) ? mention.path : join(cwd, mention.path)
+    const direct = await tryResolveMention(source, absolute)
+    if (direct !== undefined || mention.literal === undefined) {
+      return { resolved: direct, literalFallback: false }
+    }
+    const literalPath = isAbsolute(mention.literal) ? mention.literal : join(cwd, mention.literal)
+    const fallback = await tryResolveMention(source, literalPath)
+    return { resolved: fallback, literalFallback: fallback !== undefined }
+  }
+
+  /** Resolve one `@mention` and hand it to the branch that can attach it. */
+  const expandMention = async (source: MentionFs, mention: Mention): Promise<void> => {
     const display = mention.literal ?? mention.path
     const imageMediaType = mentionImageMediaType(mention.path)
     // A depleted text budget must not hide a later image reference: image
     // admission has independent limits and still follows source order.
-    if (budget <= 0 && imageMediaType === undefined) continue
-    // Mentions resolve against the session cwd, same as the model-facing fs
-    // tools; absolute paths pass through untouched. A `#L12-14` line suffix
-    // (issue #359) is stripped before resolution; when the stripped path
-    // misses, the typed literal (suffix intact) gets ONE fallback try so
-    // filenames genuinely containing `#L…` still resolve as whole files.
-    const absolute = isAbsolute(mention.path) ? mention.path : join(cwd, mention.path)
-    let resolved = await tryResolveMention(fs, absolute)
-    let literalFallback = false
-    if (resolved === undefined && mention.literal !== undefined) {
-      const literalPath = isAbsolute(mention.literal) ? mention.literal : join(cwd, mention.literal)
-      resolved = await tryResolveMention(fs, literalPath)
-      literalFallback = resolved !== undefined
-    }
+    if (budget <= 0 && imageMediaType === undefined) return
+    const { resolved, literalFallback } = await resolveMentionPath(source, mention)
     if (resolved === undefined) {
       missing.push(display)
-      continue
+      return
     }
     const { target, info } = resolved
     // On a literal-fallback hit the attached file IS the typed name — the
@@ -10090,92 +10313,32 @@ export async function expandMentions(
       ? mentionImageMediaType(mention.literal)
       : imageMediaType
     if (info?.type === 'file') {
-      if (imageType !== undefined && attachments !== undefined && fs.readBytes !== undefined) {
-        const limits = attachments.imageLimits
-        if (!limits.mediaTypes.includes(imageType) || imageCount >= limits.maxImagesPerMessage) {
-          missing.push(display)
-          continue
-        }
-        try {
-          const data = await fs.readBytes(target, undefined, limits.maxImageBytes)
-          if (imageBytes + data.byteLength > limits.maxMessageImageBytes) {
-            missing.push(display)
-            continue
-          }
-          const attachment = await attachments.saveImage({
-            data,
-            mediaType: imageType,
-            name: basename(target.displayPath),
-          })
-          blocks.push({ type: 'image', attachment })
-          imageCount += 1
-          imageBytes += data.byteLength
-          attached.push(display)
-        } catch {
-          missing.push(display)
-        }
-        continue
+      const readBytes = source.readBytes
+      if (imageType !== undefined && attachments !== undefined && readBytes !== undefined) {
+        await admitMentionImage(display, target, imageType, attachments, readBytes.bind(source))
+        return
       }
-      try {
-        const cap = Math.min(MENTION_MAX_FILE_CHARS, budget)
-        const content = await fs.readText(target)
-        let body = content
-        let truncated = false
-        let header = `<attached-file path="${shownPath}">`
-        if (mention.startLine !== undefined && !literalFallback) {
-          // Line-range slice (issue #359): 1-based inclusive. An endLine
-          // past EOF clamps to the file; a startLine past EOF falls back
-          // to the whole file with an in-band note — never a silent
-          // empty attach. Line ranges never apply to literal-fallback
-          // hits (those files really are named `…#L…`, no suffix typed).
-          const lines = content.split('\n')
-          if (mention.startLine > lines.length) {
-            header = `<attached-file path="${shownPath}" lines="${mention.startLine}-${mention.endLine}" note="requested lines beyond EOF (file has ${lines.length} line${lines.length === 1 ? '' : 's'}); whole file attached">`
-          } else {
-            const endLine = Math.min(mention.endLine ?? mention.startLine, lines.length)
-            header = `<attached-file path="${shownPath}" lines="${mention.startLine}${endLine === mention.startLine ? '' : `-${endLine}`}">`
-            body = lines.slice(mention.startLine - 1, endLine).join('\n')
-          }
-        }
-        if (body.length > cap) {
-          body = body.slice(0, cap)
-          truncated = true
-        }
-        budget -= body.length
-        blocks.push({
-          type: 'text',
-          text: `${header}\n${body}${truncated ? '\n[… truncated]' : ''}\n</attached-file>`,
-        })
-        attached.push(display)
-      } catch {
-        // Binary/undecodable or unreadable — report it like a miss.
-        missing.push(display)
-      }
-      continue
+      await attachMentionFile(source, display, shownPath, target, mention, literalFallback)
+      return
     }
     if (info?.type === 'directory') {
-      try {
-        const entries = await fs.listDir(target)
-        const listing = entries
-          .slice(0, MENTION_MAX_DIR_ENTRIES)
-          .map(entry => (entry.type === 'directory' ? `${entry.name}/` : entry.name))
-        if (entries.length > MENTION_MAX_DIR_ENTRIES) {
-          listing.push(`… (${entries.length - MENTION_MAX_DIR_ENTRIES} more)`)
-        }
-        const body = listing.join('\n')
-        budget -= body.length
-        blocks.push({
-          type: 'text',
-          text: `<attached-directory path="${shownPath}">\n${body}\n</attached-directory>`,
-        })
-        attached.push(display)
-      } catch {
-        missing.push(display)
-      }
-      continue
+      await attachMentionDirectory(source, display, shownPath, target)
+      return
     }
     // Absent (stat → undefined) or a special file.
     missing.push(display)
+  }
+
+  // `@image` files and staged `[Image #N]` capabilities share one admission
+  // queue. The earliest reference in the user's text wins both the per-
+  // message count and byte budgets, and image blocks preserve that order.
+  for (const reference of references) {
+    if (reference.kind === 'staged-image') {
+      admitStagedImage(reference.token, reference.attachment)
+      continue
+    }
+    if (fs === undefined) continue
+    await expandMention(fs, reference.mention)
   }
   return { blocks, attached, missing }
 }
