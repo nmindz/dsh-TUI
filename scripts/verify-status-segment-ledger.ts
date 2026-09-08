@@ -52,6 +52,7 @@ const root = new Context()
 root.plugin(pluginHostRow as never)
 root.plugin(TuiEffectLedgerRuntime as never)
 root.plugin(TuiStatusRuntime as never)
+// 固定窗:pacing 三个 Cordis 插件异步注册完成无单一可观测条件，等一拍再挂载组件。
 await sleep(40)
 
 const COMPONENT = 'segment-probe'
@@ -149,6 +150,7 @@ check(
 const current = status.setSegment({ key: KEY, text: '🌿 main*', color: 'remember' })
 const beforeRelease = records(KEY).length
 current?.()
+// 固定窗:探针 观察窗断言不变量：dispose 只能写一条 release。轮询到 ==1 会立刻返回，重复 release 就测不出来了。
 await sleep(20)
 const releases = records(KEY).filter(entry => entry.operation === 'release')
 check('an explicit dispose records exactly one release', releases.length === 1, `n=${releases.length}`)
@@ -168,6 +170,7 @@ const afterRebind = records(KEY).filter(entry => entry.operation === 'bind').len
 check('re-binding after dispose writes a new bind', afterRebind === 2, `binds=${afterRebind}`)
 
 await Promise.resolve(fiber.dispose())
+// 固定窗:pacing fiber.dispose() 的收尾 flush 无可观测完成条件，删临时 HOME 前等一拍。
 await sleep(20)
 rmSync(fakeHome, { recursive: true, force: true })
 

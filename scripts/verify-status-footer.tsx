@@ -171,6 +171,7 @@ async function renderFooter(
       patchConsole: false,
     },
   )
+  // 固定窗:pacing 等首帧——render() 后 React 首次提交与 xterm 异步解析无单一可轮询锚点。
   await sleep(180)
   const output = harness.screen()
   await instance.unmount()

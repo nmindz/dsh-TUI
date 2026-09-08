@@ -251,6 +251,7 @@ async function runSteady(label: string): Promise<Run> {
   }
   if (!ink) throw new Error('Ink instance not found')
   ink.setAltScreenActive(true, true)
+  // 固定窗:pacing 切 alt-screen 后等场景稳定到 steady 再插桩，无单一可轮询锚点。
   await sleep(1200)
   await t.flush()
 
@@ -283,11 +284,13 @@ async function runSteady(label: string): Promise<Run> {
     ;(channel['version'] as number)
     channel['version'] = (channel['version'] as number) + 1
     for (const cb of listeners) cb()
+    // 固定窗:pacing 流式追加步间的节奏等待——每步只推进 channel version，无可观测完成条件。
     await sleep(8)
     await t.flush()
   }
   ink.rootNode.onComputeLayout = origCompute
   ink.unmount()
+  // 固定窗:pacing unmount 后等末帧 flush 完再结算计数器，无可观测完成条件。
   await sleep(120)
   const perFrameMeasured = frames === 0 ? Number.POSITIVE_INFINITY : measured / frames
   console.log(`  [${label}] frames=${frames} measured/frame=${perFrameMeasured.toFixed(1)} staleFrames=${staleFrames} liveNodes=${liveNodes}`)
