@@ -70,6 +70,13 @@
       "disablesBeyondWebApp": [],
       "webAppDisablesBeyondTui": [],
       "insertsSharedWithWebApp": []
+    },
+    "0.1.3-alpha.2": {
+      "disablesBeyondWebApp": [
+        "tool-str-replace-editor"
+      ],
+      "webAppDisablesBeyondTui": [],
+      "insertsSharedWithWebApp": []
     }
   }
 }
