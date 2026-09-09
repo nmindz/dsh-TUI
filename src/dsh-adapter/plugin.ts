@@ -39,7 +39,7 @@ import { readHomePrefs } from '../homePrefs.js'
 import { resolveSessionCwd } from '../utils/workspaceRoot.js'
 import { beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isStandaloneRuntime, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice } from '../update.js'
 import { getLang, isLang, resolveStartupLang, setLang, t, writeLangPref } from '../i18n.js'
-import { DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, applyImageBacking, applyMathImageBacking, applyMathImageScale, applyMathRendering, applyMermaidDiagrams, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, applyPageMargin, isPageMarginMode, normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, resolveMathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, FOOTER_FIELD_IDS, FOOTER_LAYOUT_SPACER, FOOTER_LAYOUT_WILDCARD, applyImageBacking, applyMathImageBacking, applyMathImageScale, applyMathRendering, applyMermaidDiagrams, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, applyPageMargin, isFooterLayoutToken, isPageMarginMode, normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, resolveMathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import {
   draftComboConflicts,
   effectiveComboString,
@@ -713,6 +713,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           contextUsage: Schema.boolean().default(DEFAULT_STATUS_BAR.contextUsage),
           cache: Schema.boolean().default(DEFAULT_STATUS_BAR.cache),
           tokens: Schema.boolean().default(DEFAULT_STATUS_BAR.tokens),
+          cost: Schema.boolean().default(DEFAULT_STATUS_BAR.cost),
           tps: Schema.boolean().default(DEFAULT_STATUS_BAR.tps),
           gitBranch: Schema.boolean().default(DEFAULT_STATUS_BAR.gitBranch),
           sessionTitle: Schema.boolean().default(DEFAULT_STATUS_BAR.sessionTitle),
@@ -723,7 +724,11 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
           trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
           shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
-        }).default({ ...DEFAULT_STATUS_BAR }),
+          pluginSegments: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginSegments),
+          // Explicit footer arrangement. Set, it overrides every field
+          // switch above; `|` splits left from the right-aligned group.
+          layout: Schema.array(Schema.string()).default([]),
+        }).default({ ...DEFAULT_STATUS_BAR, layout: [] }),
         // Header pixel whale art; on unless settings.yaml says otherwise.
         whale: Schema.boolean().default(true),
         // Idle whale behaviors after the intro settles; on by default —
@@ -792,7 +797,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       mathImageBacking?: MathImageBacking
       imageBacking?: ImageBacking
       latexMath?: boolean
-      statusBar?: Partial<StatusBarConfig>
+      statusBar?: Partial<Omit<StatusBarConfig, 'layout'>> & { layout?: string[] }
       shortcuts?: Partial<Record<ShortcutActionId, string>>
     }
     const applyLayout = (value: SettingsValue): void => {
@@ -863,7 +868,18 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       applyMathImageScale(value.mathImageScale ?? config.mathImageScale ?? 'auto')
       applyMathImageBacking(value.mathImageBacking ?? config.mathImageBacking ?? 'transparent')
       applyImageBacking(value.imageBacking ?? config.imageBacking ?? 'transparent')
-      channel.setStatusBar(normalizeStatusBar(value.statusBar ?? config.statusBar))
+      const statusBar = normalizeStatusBar(value.statusBar ?? config.statusBar)
+      // Warn once per apply for layout tokens that survive shape validation
+      // but name no built-in field — a typo, or a plugin that never
+      // registered. The render path must stay silent, so this is the only
+      // place a user learns their layout has a dead entry.
+      for (const token of statusBar.layout ?? []) {
+        if (token === FOOTER_LAYOUT_SPACER || token === FOOTER_LAYOUT_WILDCARD) continue
+        if (!FOOTER_FIELD_IDS.includes(token as never)) {
+          ctx.logger.info(`dsh-tui: statusBar.layout token "${token}" matches no built-in field; expecting a plugin segment with that key`)
+        }
+      }
+      channel.setStatusBar(statusBar)
     }
     // Legacy user scopes layer over cordis.yml. Modern Config is already
     // resolved: an unset action must not revive its startup override.
@@ -1171,6 +1187,23 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         },
         {
           ...settingField('statusBar.shortcutHint'),
+        },
+        {
+          ...settingField('statusBar.pluginSegments'),
+        },
+        {
+          // Comma-separated on screen, stored as an array. Naming any field
+          // makes the layout authoritative: the switches above stop gating.
+          ...settingField('statusBar.layout'),
+          format: (value: unknown) => Array.isArray(value) ? value.join(', ') : '',
+          parse: (text: string) => {
+            const trimmed = text.trim()
+            if (trimmed === '') return { kind: 'set' as const, value: [] }
+            const tokens = trimmed.split(',').map(token => token.trim()).filter(token => token !== '')
+            // Reject the whole draft on a bad token rather than drop one silently.
+            if (!tokens.every(token => isFooterLayoutToken(token))) return undefined
+            return { kind: 'set' as const, value: tokens }
+          },
         },
         {
           ...settingField('whale'),

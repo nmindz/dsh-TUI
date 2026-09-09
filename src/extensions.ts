@@ -47,9 +47,18 @@ export type {
   TuiDialogSelectRequest,
   TuiDialogSnapshot,
 } from './dsh-adapter/dialogs.js'
-export { TuiStatusRuntime, TuiStatusStore } from './dsh-adapter/status.js'
+export { TUI_STATUS_COLORS, TuiStatusRuntime, TuiStatusStore } from './dsh-adapter/status.js'
+// `TuiFooterSegmentEntry` is host-only (the normalized store shape) and is
+// deliberately absent, exactly as `TuiStatusViewEntry` is.
 export type {
+  TuiFieldDecoration,
+  TuiFieldDecorationDisposer,
+  TuiFooterPlacement,
+  TuiFooterSegment,
+  TuiFooterSegmentDisposer,
+  TuiStatusColor,
   TuiStatusEntry,
+  TuiStatusPlacement,
   TuiStatusViewDescriptor,
   TuiStatusViewDisposer,
   TuiStatusViewMaxRows,

@@ -1,6 +1,6 @@
 import { setMinimalUiMode } from '../../minimalUiMode.js'
 import { normalizeSplashFont, type SplashFontSetting } from '../../components/splashFonts.js'
-import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, type StatusBarConfig } from '../../tuiDisplayPrefs.js'
+import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, sameFooterLayout, normalizeToolBackground, type StatusBarConfig } from '../../tuiDisplayPrefs.js'
 import type { ChannelState } from '../channel/types.js'
 
 /** The single minimal-UI write path: module store + channel field + one
@@ -85,9 +85,12 @@ export function createPreferences(getState: () => Pick<ChannelState, 'diffLayout
     setStatusBar(config) {
       const state = getState()
       const next = normalizeStatusBar({ ...state.statusBar, ...config })
+      // Every field but `layout` is a boolean; `layout` normalizes to a
+      // fresh array each call and needs a content comparison.
       const changed = Object.keys(next).some(key =>
-        next[key as keyof StatusBarConfig] !== state.statusBar[key as keyof StatusBarConfig],
-      )
+        key !== 'layout'
+        && next[key as keyof StatusBarConfig] !== state.statusBar[key as keyof StatusBarConfig],
+      ) || !sameFooterLayout(next.layout, state.statusBar.layout)
       if (!changed) return
       state.statusBar = next
       state.emit()

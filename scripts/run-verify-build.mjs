@@ -107,6 +107,9 @@ const GATES = [
   'verify:math-block-image',
   'verify:math-inline-image',
   'verify:semantic-copy',
+  'verify:status-footer',
+  'verify:turn-error-replay',
+  'verify:status-segment-ledger',
   'verify:btw',
   'verify:session-mounts',
 ]
