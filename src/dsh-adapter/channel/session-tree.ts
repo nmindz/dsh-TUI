@@ -6,6 +6,8 @@ import { t } from '../../i18n.js'
 import {
   defaultMaxScanned,
   liveSessionListingFields,
+  readInheritedCutForSession,
+  readInheritedCutFrom,
   readPhysicalHeaderSeedLength,
   readPhysicalHeaderSeedLengthForSession,
   readSessionEventsFromFile,
@@ -17,6 +19,22 @@ import { enumerateSessions, readInheritedCut, type SessionSource, type RawSessio
 import { buildSessionTree, liveTailWindow, type FamilySession, type SessionTreeData } from '../sessionTree.js'
 import type { ChannelUi } from '../../adapter/ports/channel-ui.js'
 import type { ChannelOwner } from './owner.js'
+
+/**
+ * Last-resort inherited-cut source for a branch that will NOT be fully read
+ * (budget spent, or an unreadable log). No on-disk header carries
+ * `seedLength` any more, so without this a real fork detaches and its whole
+ * branch disappears from the family. Bounded by the probe's own envelope cap
+ * and read-only; `undefined` keeps today's detached behavior.
+ */
+function probeInheritedCut(
+  id: string,
+  locatedPath: string | undefined,
+  hasLocate: boolean,
+): number | undefined {
+  if (locatedPath !== undefined) return readInheritedCutFrom(locatedPath)
+  return hasLocate ? undefined : readInheritedCutForSession(id)
+}
 
 /** Bounded family-tree assembly owns budgets; binding remains the caller's authority. */
 export function createSessionTreeReader(ctx: Context, binding: { readonly agent: Agent }, cwd: () => string, notify: ChannelUi['notify'], owner: ChannelOwner) {
@@ -342,8 +360,15 @@ async function readTree(): Promise<SessionTreeData | null> {
           // Budget spent: keep the STRUCTURE — the session degrades to an
           // unloaded placeholder so its branch (and any ancestor chain
           // through it) stays visible instead of vanishing from the tree.
+          // The cut still has to be resolved, or the model detaches this
+          // branch entirely; the standalone probe is the only source left
+          // once the full read is off the table.
           truncated = true
-          familySessions.push({ ...facts, events: [], live: false, unloaded: true })
+          const probed = parentId !== undefined && inheritedCut === undefined
+            ? probeInheritedCut(id, locatedPath, hasLocate)
+            : undefined
+          const placeholder = probed === undefined ? facts : { ...facts, seedLength: probed }
+          familySessions.push({ ...placeholder, events: [], live: false, unloaded: true })
           coveredThrough.set(id, parentCovered)
           continue
         }
@@ -375,6 +400,10 @@ async function readTree(): Promise<SessionTreeData | null> {
         let physicalVersion: number | undefined
         let complete = true
         let failed = false
+        // The cut the reader observed on the walk it already made — the
+        // cheapest of the four sources, and the only one that survives the
+        // retirement of header `seedLength`.
+        let readCut: number | undefined
         // First seq the chosen source actually covers: the file readers start
         // at the inherited-prefix skip, inspect always hands the whole log.
         let readFrom = 0
@@ -387,6 +416,7 @@ async function readTree(): Promise<SessionTreeData | null> {
             if (viaPath !== undefined) {
               physicalVersion = viaPath.formatVersion
               scanBudget -= viaPath.scanned
+              readCut = viaPath.inheritedCut
               if (viaPath.failed === true) failed = true
               else {
                 events = viaPath.events
@@ -400,6 +430,7 @@ async function readTree(): Promise<SessionTreeData | null> {
           if (read !== undefined) {
             physicalVersion = read.formatVersion
             scanBudget -= read.scanned
+            readCut = read.inheritedCut
             if (read.failed === true) failed = true
             else {
               events = read.events
@@ -474,11 +505,22 @@ async function readTree(): Promise<SessionTreeData | null> {
             events = undefined
           }
         }
+        // A proven cut from the read itself outranks nothing else available:
+        // no on-disk header carries `seedLength` any more, so for every real
+        // fork this is the source that keeps the branch attached.
+        if (parentId !== undefined && inheritedCut === undefined && readCut !== undefined) {
+          inheritedCut = readCut
+          facts = { ...facts, seedLength: readCut }
+        }
         if (failed || events === undefined) {
           // An unreadable log keeps the branch structure, no entries — and
           // stays transparent for coverage, so a fork of this branch dedups
           // against the grandparent instead of hiding its own history.
-          familySessions.push({ ...facts, events: [], live: false, unreadable: true })
+          const probed = parentId !== undefined && inheritedCut === undefined
+            ? probeInheritedCut(id, locatedPath, hasLocate)
+            : undefined
+          const placeholder = probed === undefined ? facts : { ...facts, seedLength: probed }
+          familySessions.push({ ...placeholder, events: [], live: false, unreadable: true })
           coveredThrough.set(id, parentCovered)
           continue
         }

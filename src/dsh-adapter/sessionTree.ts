@@ -4,11 +4,13 @@ export type { SessionTreeData, TreeNode, TreeEntry, TreeEntryKind, SessionTreeMe
  * Session family tree — the model behind the /tree screen
  * (pi's Session Tree ported to DSH's cross-session fork model).
  *
- * DSH sessions are linear event logs; a rewind forks a NEW session whose
- * header records `parentSession` + `seedLength` (the inherited prefix). The
- * tree stitches the whole family back together: each session contributes its
- * OWN entries (events at seq >= seedLength when the parent is known), a fork
- * attaches at the parent's last entry with seq <= seedLength-1, and the
+ * DSH sessions are linear event logs; a rewind forks a NEW session recording
+ * `parentSession`, whose inherited prefix length the channel layer resolves —
+ * from a legacy header's own cut, otherwise from the log's `session/end-seed`
+ * boundary carrying `inherited: true` (upstream retired the header field).
+ * The tree stitches the whole family back together: each session contributes
+ * its OWN entries (events at seq >= seedLength when the parent is known), a
+ * fork attaches at the parent's last entry with seq <= seedLength-1, and the
  * parent's own tail past that point is the abandoned "main" branch.
  *
  * Pure module: no Ink, no channel state — channel.ts gathers the logs, this
@@ -17,6 +19,11 @@ export type { SessionTreeData, TreeNode, TreeEntry, TreeEntryKind, SessionTreeMe
  * @module @deepseek-harness-tui/dsh-tui/sessionTree
  */
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  asAssistantChunk,
+  deltaText,
+  type AssistantChunkEvent,
+} from './upstream-legacy.js'
 
 /** Filter modes cycled in the tree screen (pi parity, minus labels). */
 export type TreeFilter = 'default' | 'no-tools' | 'user-only' | 'all'
@@ -27,6 +34,10 @@ export interface FamilySession {
   readonly id: string
   readonly createdAt: number
   readonly parentSession?: string
+  /** Exact inherited prefix length, resolved read-only by the channel layer
+   *  across the listed header, a legacy physical header, the log's own
+   *  inherited-seed boundary, and backend inspect. Absent only when none of
+   *  them proved it — which detaches the edge rather than guessing 0. */
   readonly seedLength?: number
   /** This log's events (inherited seed prefix + own events), in log order.
    *  A coverage-skipped read starts at the first seq no ancestor displays —
@@ -148,34 +159,30 @@ function firstTextOf(content: readonly Block[] | undefined): string {
  * share it.)
  */
 export function coalesceReplayEvents(events: readonly SessionEvent[]): SessionEvent[] {
-  type LegacyChunkData = { turn: number; step: number; chunk: { type: string; text?: string } }
-  const legacyChunkDataOf = (event: SessionEvent): LegacyChunkData | undefined => {
-    if ((event as { type: string }).type !== 'assistant/chunk') return undefined
-    const data = (event as unknown as { data: LegacyChunkData }).data
-    if (data.chunk?.type !== 'text-delta' && data.chunk?.type !== 'reasoning-delta') return undefined
-    return data
-  }
   const out: SessionEvent[] = []
-  let run: { event: SessionEvent; data: LegacyChunkData; parts: string[] } | null = null
+  let run: { event: AssistantChunkEvent; type: string; parts: string[] } | null = null
   const flush = (): void => {
     if (run === null) return
+    const chunk = run.event.data.chunk
     out.push({
       ...run.event,
-      data: { ...run.data, chunk: { ...run.data.chunk, text: run.parts.join('') } },
+      data: { ...run.event.data, chunk: { ...chunk, text: run.parts.join('') } },
     } as unknown as SessionEvent)
     run = null
   }
   for (const event of events) {
-    const data = legacyChunkDataOf(event)
-    if (data !== undefined) {
-      if (run !== null && run.data.chunk.type === data.chunk.type) {
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack text
-        run.parts.push(data.chunk.text ?? '')
+    // Retired event type: read through the legacy narrowing rather than the
+    // union, which no longer declares it (see upstream-legacy).
+    const legacy = asAssistantChunk(event)
+    const text = legacy === undefined ? undefined : deltaText(legacy.data.chunk)
+    if (legacy !== undefined && text !== undefined) {
+      const kind = legacy.data.chunk.type
+      if (run !== null && run.type === kind) {
+        run.parts.push(text)
         continue
       }
       flush()
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable replay data may lack text
-      run = { event, data, parts: [data.chunk.text ?? ''] }
+      run = { event: legacy, type: kind, parts: [text] }
       continue
     }
     flush()
@@ -451,6 +458,26 @@ export function extractEntries(sessionId: string, events: readonly SessionEvent[
     return
   }
 
+  /** A streamed text delta, recorded tentatively until the message settles. */
+  const entryFromAssistantChunk = (event: AssistantChunkEvent): void => {
+    const chunk = event.data.chunk
+    if (chunk.type !== 'text-delta') return
+    const text = deltaText(chunk) ?? ''
+    if (!text.trim()) return
+    const key = `${event.data.turn}:${event.data.step}`
+    const index = push({
+      seq: event.seq,
+      kind: 'assistant',
+      text: preview(text),
+      searchText: `assistant ${text}`,
+      time: event.time,
+    })
+    const group = tentatives.get(key)
+    if (group === undefined) tentatives.set(key, [index])
+    else group.push(index)
+    return
+  }
+
   /** A tool invocation, tracked open until its result arrives. */
   const entryFromToolCall = (event: Extract<SessionEvent, { type: 'tool/call' }>): void => {
     if (event.data.name === 'ask_user_question') return
@@ -510,27 +537,12 @@ export function extractEntries(sessionId: string, events: readonly SessionEvent[
       inFirstTurn = markFirstTurn && turnsSeen === 1
       continue
     }
-    // Pre-V3 durable logs only: per-token chunk events predate the 0.1.5
-    // union (V3 embeds the stream in assistant/message.stream), so they are
-    // handled structurally outside the typed switch.
-    if ((event as { type: string }).type === 'assistant/chunk') {
-      const data = (event as unknown as { data: { turn: number; step: number; chunk: { type: string; text?: string } } }).data
-      if (data.chunk.type === 'text-delta') {
-        const text = data.chunk.text ?? ''
-        if (text.trim()) {
-          const key = `${data.turn}:${data.step}`
-          const index = push({
-            seq: event.seq,
-            kind: 'assistant',
-            text: preview(text),
-            searchText: `assistant ${text}`,
-            time: event.time,
-          })
-          const group = tentatives.get(key)
-          if (group === undefined) tentatives.set(key, [index])
-          else group.push(index)
-        }
-      }
+    // Retired event type, still present in every older log: handled before
+    // the switch, because a `case` on a literal the union dropped is a type
+    // error and collapses the branch's event to `never`.
+    const legacyChunk = asAssistantChunk(event)
+    if (legacyChunk !== undefined) {
+      entryFromAssistantChunk(legacyChunk)
       continue
     }
     switch (event.type) {

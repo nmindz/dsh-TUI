@@ -151,6 +151,12 @@ function locate(source: SessionSource, raw: unknown, sessionId: string): string 
     }
     if (location !== null && typeof location === 'object') {
       const path = (location as Record<string, unknown>)['path']
+      // The hint names the CURRENT format generation, so it is absent for a
+      // session stored at an older one — resolving it here (rather than
+      // trusting the string) is what keeps `bytes`, digest titles and
+      // mtime ordering from silently degrading to fallbacks. An authoritative
+      // location that resolves to nothing ends the lookup: falling back to the
+      // root scan there would hand back a same-id log from another store.
       if (typeof path === 'string' && path.length > 0) return resolveLocatedPath(path)?.path
     }
   }

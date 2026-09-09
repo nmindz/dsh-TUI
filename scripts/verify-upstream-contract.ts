@@ -29,6 +29,13 @@ assert.deepEqual(parseUpstreamVersion('0.1.2-alpha.3'), [0, 1, 2, 'alpha', 3])
 assert.ok(compareVersions(alpha, beta) < 0 && compareVersions(beta, rc) < 0)
 assert.ok(compareVersions(rc, parseUpstreamVersion('0.1.1-rc.2')!) > 0)
 assert.equal(parseUpstreamVersion('0.1.2'), undefined)
+// The validated set crossed a MINOR at 0.1.5-alpha.1, so an alpha now has to
+// outrank an older rc. Ordering by channel alone would invert this pair.
+const crossMinorAlpha = parseUpstreamVersion('0.1.5-alpha.1')!
+assert.deepEqual(crossMinorAlpha, [0, 1, 5, 'alpha', 1])
+assert.ok(compareVersions(crossMinorAlpha, rc) > 0)
+assert.ok(compareVersions(crossMinorAlpha, parseUpstreamVersion('0.1.5-alpha.2')!) < 0)
+assert.ok(compareVersions(crossMinorAlpha, parseUpstreamVersion('0.1.5-rc.1')!) < 0)
 assert.match(UPSTREAM_VALIDATED_LABEL, /^0\.1\.5-rc\.1/u)
 // The primary line must itself be a validated line. Without this, dropping
 // the primary from UPSTREAM_VALIDATED_VERSIONS still passes the prefix match

@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { clearResumeTarget, forgetSession, readResumeTarget, touchSession, writeResumeTarget } from '../../sessionHistory.js'
 import { t } from '../../i18n.js'
 import { appendSessionTitle, deleteSessionLog } from '../compat/index.js'
+import { legacyHeaderSystem } from '../upstream-legacy.js'
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
 import { collectRecentActivity, parseRecapResponse, RECAP_RECENT_CHARS, wrapRecapPrompt } from '../recap.js'
 import { listSummaries, locateSession, previewSession, type SessionSource, type SessionSummary } from '../sessions/index.js'
@@ -117,12 +118,13 @@ export function createSessionMetadataActions(ctx: Context, deps: {
   const llmRequest = (capture: Capture, messages: Message[], includesHistory: boolean, signal?: AbortSignal): Record<string, unknown> => {
     const header = capture.agent.session.requestHeader()
     const config = header?.config
-    // Pre-V3 headers carried the system prompt inline; V3 moved it to
-    // `system/message` surface nodes (see currentSystemText).
-    const legacySystem = (header as { system?: unknown } | undefined)?.system
+    // Retired field: pre-V3 headers carried the system prompt inline, newer
+    // lines carry it as derived history (a `system/message` surface event),
+    // so a missing header field falls back to currentSystemText.
+    const legacySystem = legacyHeaderSystem(header)
     const system = messages.some(message => message.role === 'system')
       ? undefined
-      : typeof legacySystem === 'string' ? legacySystem : includesHistory ? undefined : currentSystemText(capture)
+      : legacySystem ?? (includesHistory ? undefined : currentSystemText(capture))
     return {
       provider: config?.provider ?? deps.provider(),
       model: config?.model ?? deps.model(),
