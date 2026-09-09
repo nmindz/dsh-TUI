@@ -12,6 +12,12 @@
  *
  * Run with plain node against the compiled lib: `node scripts/verify-compact.mjs`
  */
+
+// Import FIRST: static imports are hoisted, so pinning the language inline
+// would run after the i18n module already evaluated. Assertions here check
+// Chinese notice text, and without the pin the script inherits the
+// developer's own `/lang` choice from ~/.dsh-tui/lang.json.
+import './lib/default-lang-zh.mjs'
 import { createChannel } from '../lib/types/dsh-adapter/channel.js'
 import React from 'react'
 import { render } from '../lib/types/ui.js'

@@ -987,7 +987,16 @@ export function SessionBrowser({
                   <Text dimColor italic>{` ${truncateWidth(t('session-loading'), listWidth - 2)}`}</Text>
                 )}
                 {loaded && view.rows.length === 0 && (
-                  <Text dimColor italic>{` ${truncateWidth(t('resume-none-in-cwd'), listWidth - 2)}`}</Text>
+                  <Text dimColor italic>
+                    {` ${truncateWidth(
+                      view.hiddenLive === 0
+                        ? t('resume-none-in-cwd')
+                        : view.hiddenLive === 1
+                          ? t('resume-only-live-here')
+                          : t('resume-only-live-here-n', { n: view.hiddenLive }),
+                      listWidth - 2,
+                    )}`}
+                  </Text>
                 )}
                 {visible.map((row, index) =>
                   row.kind === 'project' ? (

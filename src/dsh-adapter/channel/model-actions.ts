@@ -10,6 +10,7 @@ import { resolveCompatiblePreset, rosterOf, type AgentPresetInfo } from '../pres
 import type { createChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { ChannelState, EffortOption, PresetOption } from './types.js'
+import type { ModelProviderInfo } from '../types.js'
 
 type Binding = ReturnType<typeof createChannelBinding>
 
@@ -155,9 +156,40 @@ export function createModelActions(
   }
   const listModels = (): Promise<readonly LlmModelInfo[]> => {
     if (llmRuntime === undefined) return Promise.resolve([])
-    return Promise.all(llmRuntime.listProviders().map(provider => llmRuntime.listModels(provider.id).catch(() => []))).then(lists => lists.flat())
+    // One route's failure must not strand the rest, but it is logged rather
+    // than swallowed silently — its group row survives via listProviders,
+    // and the log is the only place the reason can still be read.
+    return Promise.all(llmRuntime.listProviders().map(provider => llmRuntime.listModels(provider.id).catch((error: unknown) => {
+      ctx.logger.warn(`dsh-tui: provider route "${provider.id}" listed no models: %o`, error)
+      return [] as readonly LlmModelInfo[]
+    }))).then(lists => lists.flat())
   }
-  const listProviders = () => Promise.resolve(llmRuntime === undefined ? [] : llmRuntime.listProviders().map(info => ({ ...info })))
+  const listProviders = (): Promise<readonly ModelProviderInfo[]> => {
+    if (llmRuntime === undefined) return Promise.resolve([])
+    // The registry lists every route it can serve: catalog families that ship
+    // mounted but that nobody configured (openai/xai/deepseek), and OAuth
+    // routes an auth bundle claims while signed out. Those must not become
+    // picker rows on their own — entering one can only report "unavailable".
+    //
+    // TAG rather than drop: an unconfigured route that nonetheless lists
+    // models (a signed-in OAuth route) still earns its row through the
+    // model-list union in modelGroups, and keeping it here is what lets the
+    // picker mark it instead of pretending it does not exist.
+    //
+    // The RESOLVED section, not the user layer: a route inherited from a
+    // composition base is configured and usable even though `/provider`
+    // cannot edit it.
+    const section = (ctx.get('settings') as { get(ns: string): unknown } | undefined)
+      ?.get('llm-pi-ai') as { providers?: Record<string, unknown> } | undefined
+    const configured = section?.providers
+    const known = configured !== null && typeof configured === 'object' ? configured : undefined
+    return Promise.resolve(llmRuntime.listProviders().map(info => ({
+      ...info,
+      // No settings service (or no section): treat every route as configured
+      // rather than blanking the picker's top level.
+      ...(known === undefined ? {} : { configured: Object.hasOwn(known, info.id) }),
+    })))
+  }
   const dropModelNodeCache = (): void => { modelNodeCache.generation += 1; modelNodeCache.nodes = undefined; modelNodeCache.load = undefined }
   const warmModelNodes = (): void => {
     if (modelNodeCache.load !== undefined) return
