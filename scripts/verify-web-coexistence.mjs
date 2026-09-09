@@ -17,6 +17,8 @@ import { parse } from 'yaml'
 import { applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
 import { evaluate } from '@deepseek-ai/cordis-plugin-loader'
 import { prepareUpstreamSourceResolver } from './upstream-source-baseline.mjs'
+// Derived from the contract so a line bump touches contract.ts only.
+import { UPSTREAM_VALIDATED_VERSION } from '../lib/types/dsh-adapter/contract.js'
 
 const yamlOptions = { logLevel: 'silent' }
 const loadPatch = path => parse(readFileSync(path, 'utf8'), yamlOptions)
@@ -42,8 +44,8 @@ const sourceBasePath = join(sourceRoot, 'packages/bundle/base/cordis.patch.yml')
 const requireSourceBaseline = process.env.DSH_REQUIRE_ALPHA_BASELINE === '1'
 if (existsSync(sourceWebPath) && existsSync(sourceWebManifest) && existsSync(sourceBasePath)) {
   const sourceWebVersion = JSON.parse(readFileSync(sourceWebManifest, 'utf8')).version
-  if (requireSourceBaseline && sourceWebVersion !== '0.1.5-rc.1') {
-    throw new Error(`required source baseline is 0.1.5-rc.1, got ${sourceWebVersion}`)
+  if (requireSourceBaseline && sourceWebVersion !== UPSTREAM_VALIDATED_VERSION) {
+    throw new Error(`required source baseline is ${UPSTREAM_VALIDATED_VERSION}, got ${sourceWebVersion}`)
   }
   const resolver = prepareUpstreamSourceResolver(sourceRoot)
   baselines.push({

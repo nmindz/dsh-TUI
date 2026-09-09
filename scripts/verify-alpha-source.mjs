@@ -10,7 +10,12 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
-const EXPECTED_UPSTREAM_VERSION = process.env.DSH_HARNESS_EXPECTED_VERSION ?? '0.1.5-rc.1'
+// Derived from the contract so a line bump touches contract.ts only. The
+// alpha-compat lane runs `pnpm build` before this gate, so lib/types exists.
+// NOTE: the lane's own upstream checkout pin (ci.yml) is a separate fact that
+// must move in the same change, or this reports a version mismatch.
+const { UPSTREAM_VALIDATED_VERSION } = await import('../lib/types/dsh-adapter/contract.js')
+const EXPECTED_UPSTREAM_VERSION = process.env.DSH_HARNESS_EXPECTED_VERSION ?? UPSTREAM_VALIDATED_VERSION
 const tuiRoot = resolve(import.meta.dirname, '..')
 const sourceRoot = resolve(process.env.DSH_HARNESS_SOURCE_ROOT ?? join(tuiRoot, '../deepseek-harness'))
 const sourceManifestPath = join(sourceRoot, 'package.json')

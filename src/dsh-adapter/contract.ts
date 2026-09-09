@@ -8,6 +8,17 @@
  * Every official package this adapter touches is blessed here; anything
  * else must go through upstream channels or the adapter, never the UI.
  *
+ * What the 0.1.5 line changed, and where the adapter absorbs it:
+ *  - Session artifacts are generation-tagged (`session.vN.jsonl.zstd`);
+ *    `locate()` reports only the CURRENT generation, so an older-generation
+ *    log needs resolving inside its own directory (compat/sessionLog).
+ *  - The physical header retired `seedLength`; a fork's inherited prefix is
+ *    recovered from the log's own `session/end-seed` boundary.
+ *  - `decodeStorageRecord` was removed from dsh-session. It was reached
+ *    lazily through createRequire, so no type gate could see the removal —
+ *    compat/sessionLog now probes for it and decodes one row per event when
+ *    it is absent.
+ *
  * `upstreamDrift()` powers the CI gate (scripts/verify-upstream-contract.ts)
  * so a mismatched install fails in CI before it fails on a user's machine.
  * `upstreamDriftSummary()` collapses the per-package entries into the
