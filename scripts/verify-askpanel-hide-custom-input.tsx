@@ -14,6 +14,9 @@ process.env.FORCE_COLOR = '3'
 // 不 pin 会随宿主 lang.json 或 locale 漂移（en 机器上必挂）。
 process.env.DSH_TUI_LANG = 'zh'
 
+// Assertions below check Chinese notice text.
+import './lib/default-lang-zh.mjs'
+
 const [{ PassThrough, Writable }, React, { Terminal: XTerm }, { render }, { AskUserQuestionPanel }, { settle, settled, sleep, viewportLines }] = await Promise.all([
   import('node:stream'),
   import('react'),

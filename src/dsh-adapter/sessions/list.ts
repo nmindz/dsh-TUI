@@ -27,6 +27,7 @@ import {
 import { fileFacts } from './frames.js'
 import { scheduleTitleRecovery, titleRecoveryNeedsWork } from './recovery.js'
 import { classify, readHeader, type RawSessionHeader } from './header.js'
+import { logForDebugging } from '../../utils/debug.js'
 import { findSessionLogFile, resolveLocatedPath } from '../compat/sessionLog.js'
 import { indexFileStamp, readIndex, writeIndex, type DerivedEntry, type SessionIndex } from './store.js'
 import type { SessionSummary } from './types.js'
@@ -52,7 +53,11 @@ export interface SessionSource {
   readonly identity?: symbol
   /** Headers plus per-log change tokens — the contract built for this. */
   listSnapshots?: (signal?: AbortSignal) => Promise<readonly unknown[]>
-  /** Headers alone, for a backend or version without snapshots. */
+  /**
+   * The upstream listing. `SessionPersistence.list()` answers snapshots
+   * (`{ header, revision, … }`); older backends answered bare headers. Both
+   * are accepted — see {@link readListed}.
+   */
   list?: (signal?: AbortSignal) => Promise<readonly unknown[]>
   /** Absolute artifact path for one header; absent for storeless backends. */
   locate?: (meta: unknown) => unknown
@@ -65,15 +70,30 @@ interface Listed {
   readonly revision: string | undefined
 }
 
-/** Pull `{ header, revision }` out of one `listSnapshots()` element. */
-function readSnapshot(value: unknown): Listed | undefined {
+/**
+ * Read one listing element, accepting either wrapper shape.
+ *
+ * A snapshot nests its header under `header` and carries the backend's change
+ * token; a bare header carries `id` itself. Trying the nested form first keeps
+ * `raw` pointing at whichever object `locate()` expects.
+ * @param value - One element of a `list()` / `listSnapshots()` result.
+ * @returns The header with its change token, or undefined when neither shape
+ *   yields an identifiable header.
+ */
+function readListed(value: unknown): Listed | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const record = value as Record<string, unknown>
-  const raw = record['header']
-  const header = readHeader(raw)
-  if (header === undefined) return undefined
-  const revision = record['revision']
-  return { header, raw, revision: typeof revision === 'string' ? revision : undefined }
+  const nested = readHeader(record['header'])
+  if (nested !== undefined) {
+    const revision = record['revision']
+    return {
+      header: nested,
+      raw: record['header'],
+      revision: typeof revision === 'string' ? revision : undefined,
+    }
+  }
+  const bare = readHeader(value)
+  return bare === undefined ? undefined : { header: bare, raw: value, revision: undefined }
 }
 
 /**
@@ -91,27 +111,29 @@ function readSnapshot(value: unknown): Listed | undefined {
  * then as a bare header.
  */
 export async function enumerateSessions(source: SessionSource, signal?: AbortSignal): Promise<Listed[]> {
+  let elements: readonly unknown[]
   if (typeof source.listSnapshots === 'function') {
-    const snapshots = await source.listSnapshots(signal)
-    return snapshots.map(readSnapshot).filter((entry): entry is Listed => entry !== undefined)
-  }
-  if (typeof source.list === 'function') {
+    elements = await source.listSnapshots(signal)
+  } else if (typeof source.list === 'function') {
     // Handle-based providers take an options object; legacy providers took a
     // bare signal. identity is part of the handle-based service contract.
-    const headers = typeof source.identity === 'symbol'
+    elements = typeof source.identity === 'symbol'
       ? await (source.list as (options?: { signal?: AbortSignal }) => Promise<readonly unknown[]>).call(source, { signal })
       : await source.list(signal)
-    return headers
-      .map((raw): Listed | undefined => readSnapshot(raw) ?? bareListed(raw))
-      .filter((entry): entry is Listed => entry !== undefined)
+  } else {
+    logForDebugging('sessions: persistence exposes neither listSnapshots() nor list()')
+    return []
   }
-  return []
-}
-
-/** Pull a bare header out of one pre-0.1.5 `list()` element. */
-function bareListed(raw: unknown): Listed | undefined {
-  const header = readHeader(raw)
-  return header === undefined ? undefined : { header, raw, revision: undefined }
+  const listed = elements.map(readListed).filter((entry): entry is Listed => entry !== undefined)
+  // Dropping every element means the wrapper shape is unrecognized, not that
+  // history is empty; that reads to the user as "no sessions".
+  if (listed.length === 0 && elements.length > 0) {
+    logForDebugging(
+      `sessions: no identifiable header in ${elements.length} listing element(s); ` +
+        `keys=${Object.keys((elements[0] ?? {}) as object).join(',')}`,
+    )
+  }
+  return listed
 }
 
 /**

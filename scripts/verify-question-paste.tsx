@@ -25,6 +25,9 @@
  * Drives the real useInput path with fake stdin; output is captured raw
  * and ANSI-stripped (no xterm dependency).
  */
+// Assertions below check Chinese validation and error text.
+import './lib/default-lang-zh.mjs'
+
 process.env.FORCE_COLOR = '3'
 process.env.DSH_TUI_LANG = 'zh' // 中文文案断言必须在 i18n import 前固定语言。
 

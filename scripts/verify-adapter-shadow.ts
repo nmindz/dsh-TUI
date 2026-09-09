@@ -140,6 +140,8 @@ const METHOD_POLICY: Record<string, Record<string, MethodPolicy>> = {
     set: { kind: 'capability', capability: 'host.status.set' },
     registerView: { kind: 'capability', capability: 'host.status.register-view' },
     subscribe: { kind: 'capability', capability: 'host.status.subscribe' },
+    setSegment: { kind: 'capability', capability: 'host.status.set-segment' },
+    decorateField: { kind: 'capability', capability: 'host.status.decorate-field' },
   },
   TuiRendererRuntime: {
     register: { kind: 'capability', capability: 'host.renderers.register' },
