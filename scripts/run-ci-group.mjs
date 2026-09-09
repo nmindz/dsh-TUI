@@ -371,6 +371,11 @@ const GROUPS = {
 // 日志、标题来源判定、revision 命中/失效（钉住 revision 改写日志作
 // 判据）、索引自愈与剪枝、**终态等价**（增量索引 == 全新构建）。
     ["verify-session-index", ['node', 'scripts/verify-session-index.mjs']],
+// 会话产物世代解析与继承切点：混合 v2/v3/旧无世代名的 N-of-N 定位、
+// 同目录两代共存时取最高世代（取错就读到迁移前的旧日志）、非规范名
+// 一律不选、切点只认 end-seed{inherited:true} 且预算耗尽报 undefined、
+// locate() 世代纠正与防串读、解码器缺失回退、按编码分别追加标题。
+    ["verify-session-generations", ['node', '--import', 'tsx/esm', 'scripts/verify-session-generations.tsx']],
 // /resume 会话浏览器按键流回归：子运行折叠/展开、空会话不列出、搜索、
 // Esc 先清查询再退出、rename 后光标按 id 跟随目标（不是按行号）、
 // confirm-delete 只认无修饰 Enter、Esc 取消。真实 Chat 渲染驱动。

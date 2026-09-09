@@ -9,6 +9,7 @@ import { isSubagentToolName, parseJobOutputId, toolCommandOf, BACKGROUND_START_A
 import { ARGS_PREVIEW_LIMIT, harnessToolResultView, LOCAL_OUTPUT_LIMIT, prepareReplayEvents, preview, RESULT_PREVIEW_LIMIT, toolErrorText } from './transcript.js'
 import { estimateTokens, isTokenDelta, tokenDeltaChars, usageOutputTokens } from './usage.js'
 import { transcriptImagesOf, type TranscriptImage } from '../transcript-images.js'
+import { eventType, legacyHeaderSystem } from '../upstream-legacy.js'
 import { isPeakHour } from '../../deepseekPricing.js'
 import { t } from '../../i18n.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -477,7 +478,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     // block/clear) — confirmed in production logs. The pinned peer's
     // SessionEvent union predates the type, so admit it structurally: the
     // goal chip and panel stay dark without this fold.
-    if ((event as { type: string }).type === 'goal/change') {
+    if (eventType(event) === 'goal/change') {
       applyGoalChange((event as unknown as { data: GoalChangePayload }).data)
       return
     }
@@ -957,8 +958,11 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         if (typeof effort === 'string') {
           state.reasoningEffort = effort
         }
-        const legacySystem = (event.data.header as { system?: unknown }).system
-        if (typeof legacySystem === 'string') {
+        // Retired field: the system prompt became derived history (surface
+        // node 0, a `system/message` event) on newer lines, so this is the
+        // legacy source only and absence is not "no system prompt".
+        const legacySystem = legacyHeaderSystem(event.data.header)
+        if (legacySystem !== undefined) {
           state.contextSegments.system = estimateTokens(legacySystem)
         }
         break
@@ -972,7 +976,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         // `agent/assistant-stream` frames (renderStreamFrame) and compacts the
         // durable record into `assistant/message.stream`. Match by name so the
         // current union (which no longer lists the type) stays compile-clean.
-        if ((event as { type: string }).type === 'assistant/chunk') {
+        if (eventType(event) === 'assistant/chunk') {
           if (handledAssistantChunks.has(event.seq)) break
           handledAssistantChunks.add(event.seq)
           const data = (event as unknown as { data: { turn: number; step: number; chunk: StreamChunk } }).data
@@ -981,7 +985,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         }
         // dsh-tool-todo owns this optional module augmentation in alpha.2.
         // Match by name so the TUI remains loadable without that plugin.
-        if ((event as { type: string }).type === 'todo/write') {
+        if (eventType(event) === 'todo/write') {
           const todos = todoPanelItems((event as unknown as { data?: unknown }).data)
           if (todos !== undefined) state.todos = todos
           break
@@ -990,7 +994,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         // marker so a replayed log shows which composition produced the
         // turns after it. Not in dsh-session's typed union — matched here by
         // name, like the other plugin-defined events above.
-        if ((event as { type: string }).type === 'agent-preset/selected') {
+        if (eventType(event) === 'agent-preset/selected') {
           const data = event.data as unknown as { agentPreset?: string }
           const recordedPreset = typeof data.agentPreset === 'string' ? data.agentPreset : undefined
           const renamedOfficialPreset =
@@ -1009,7 +1013,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         }
         // `/color` accent (dsh-tui plugin event, replayed on resume/rewind
         // like session/title): last write wins, '' clears to the default.
-        if ((event as { type: string }).type === 'session/color') {
+        if (eventType(event) === 'session/color') {
           const data = event.data as unknown as { color?: unknown }
           state.sessionColor = typeof data.color === 'string' ? data.color : ''
           break
@@ -1022,7 +1026,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         // crashes per type.
         if (deps.renderer !== undefined) {
           const rendered = deps.renderer.render(
-            (event as { type: string }).type,
+            eventType(event),
             (event as { data?: unknown }).data,
           )
           if (rendered !== undefined) {
