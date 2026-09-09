@@ -2,10 +2,21 @@
  * Upstream compatibility contract.
  *
  * The TUI is validated against a set of upstream prerelease lines — the
- * current primary (0.1.2-rc.1) plus older lines kept in backward
- * compatibility across the 0.1.1 and 0.1.0 release families. Every official
- * package this adapter touches is blessed here; anything else must go
- * through upstream channels or the adapter, never the UI.
+ * current primary (0.1.5-alpha.1) plus older lines kept in backward
+ * compatibility across the 0.1.2, 0.1.1 and 0.1.0 release families. Every
+ * official package this adapter touches is blessed here; anything else must
+ * go through upstream channels or the adapter, never the UI.
+ *
+ * What the 0.1.5 line changed, and where the adapter absorbs it:
+ *  - Session artifacts are generation-tagged (`session.vN.jsonl.zstd`);
+ *    `locate()` reports only the CURRENT generation, so an older-generation
+ *    log needs resolving inside its own directory (compat/sessionLog).
+ *  - The physical header retired `seedLength`; a fork's inherited prefix is
+ *    recovered from the log's own `session/end-seed` boundary.
+ *  - `decodeStorageRecord` was removed from dsh-session. It was reached
+ *    lazily through createRequire, so no type gate could see the removal —
+ *    compat/sessionLog now probes for it and decodes one row per event when
+ *    it is absent.
  *
  * `upstreamDrift()` powers the CI gate (scripts/verify-upstream-contract.ts)
  * so a mismatched install fails in CI before it fails on a user's machine.
@@ -16,14 +27,15 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 /** Primary validated upstream line (newest). */
-export const UPSTREAM_VALIDATED_VERSION = '0.1.2-rc.1'
+export const UPSTREAM_VALIDATED_VERSION = '0.1.5-alpha.1'
 
 /**
  * Explicitly supported upstream prerelease lines, oldest first.
  *
- * 0.1.2-rc.1 = primary continuous-CI line; alpha.5, alpha.4, and alpha.3 are
- * mapped compatibility lines source-checked when the primary line moves;
- * 0.1.1-rc.2 and rc.1 are compatibility lines (install- and
+ * 0.1.5-alpha.1 = primary line, and the one the generation-aware session
+ * layer was verified against; 0.1.2-rc.1 demotes to a mapped compatibility
+ * line, as do alpha.5, alpha.4 and alpha.3 (source-checked when the primary
+ * line moves); 0.1.1-rc.2 and rc.1 are compatibility lines (install- and
  * type-level compatibility); 0.1.0-rc.8 = previous family (full CI coverage);
  * 0.1.0-rc.7 = full CI coverage as well; 0.1.0-rc.6 = legacy line
  * (install- and type-level compatibility, feature surface may lack later
@@ -41,6 +53,7 @@ export const UPSTREAM_VALIDATED_VERSIONS = [
   '0.1.2-alpha.4',
   '0.1.2-alpha.5',
   '0.1.2-rc.1',
+  '0.1.5-alpha.1',
 ] as const
 
 /**

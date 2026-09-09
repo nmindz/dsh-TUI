@@ -1,6 +1,7 @@
 import { type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ChatRow, ToolResultView, ToolViewPresenter } from './types.js'
 import { markChannelReadDirty } from '../../adapter/channel/read-view.js'
+import { ASSISTANT_CHUNK_TYPE, eventType } from '../upstream-legacy.js'
 
 export const ARGS_PREVIEW_LIMIT = 160
 
@@ -285,14 +286,17 @@ export function prepareReplayEvents(events: readonly SessionEvent[]): SessionEve
   }
   return events.filter(event => {
     if (event.type === 'assistant/message') return true
-    if (event.type === 'assistant/chunk') {
+    // Retired event type, still present in every older log; the union no
+    // longer declares it, so compare through the same widened view the
+    // packed rows below use.
+    const packedType = eventType(event)
+    if (packedType === ASSISTANT_CHUNK_TYPE) {
       // Keep only the in-flight tail (no message sealed after it).
-      return lastMessageSeq < 0 || event.seq > lastMessageSeq
+      return lastMessageSeq < 0 || (event as unknown as { seq: number }).seq > lastMessageSeq
     }
     // Storage-level packed rows: not in the SessionEvent union (they exist
     // only in the durable JSON), so compare through a widened view — the
     // defensive drop is exactly for data the static type doesn't know.
-    const packedType = (event as { type: string }).type
     if (
       packedType === 'text-chunks' ||
       packedType === 'reasoning-chunks' ||

@@ -28,7 +28,7 @@ import {
 import { fileFacts } from './frames.js'
 import { classify, readHeader, type RawSessionHeader } from './header.js'
 import { logForDebugging } from '../../utils/debug.js'
-import { findSessionLogFile } from '../compat/sessionLog.js'
+import { findSessionLogFile, resolveBackendArtifactPath } from '../compat/sessionLog.js'
 import { readIndex, writeIndex, type DerivedEntry, type SessionIndex } from './store.js'
 import type { SessionSummary } from './types.js'
 import { readLastUsed } from '../../sessionHistory.js'
@@ -142,7 +142,14 @@ function locate(source: SessionSource, raw: unknown, sessionId: string): string 
     }
     if (location !== null && typeof location === 'object') {
       const path = (location as Record<string, unknown>)['path']
-      if (typeof path === 'string' && path.length > 0) return path
+      // The hint names the CURRENT format generation, so it is absent for a
+      // session stored at an older one — resolving it here (rather than
+      // trusting the string) is what keeps `bytes`, digest titles and
+      // mtime ordering from silently degrading to fallbacks.
+      if (typeof path === 'string' && path.length > 0) {
+        const resolved = resolveBackendArtifactPath(path)
+        if (resolved !== undefined) return resolved
+      }
     }
   }
   return findSessionLogFile(sessionId)

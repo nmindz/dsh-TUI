@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { clearResumeTarget, forgetSession, readResumeTarget, touchSession, writeResumeTarget } from '../../sessionHistory.js'
 import { t } from '../../i18n.js'
 import { appendSessionTitle, deleteSessionLog } from '../compat/index.js'
+import { legacyHeaderSystem } from '../upstream-legacy.js'
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
 import { collectRecentActivity, parseRecapResponse, RECAP_RECENT_CHARS, wrapRecapPrompt } from '../recap.js'
 import { listSummaries, locateSession, previewSession, type SessionSource, type SessionSummary } from '../sessions/index.js'
@@ -102,11 +103,14 @@ export function createSessionMetadataActions(ctx: Context, deps: {
   const llmRequest = (capture: Capture, messages: Message[], signal?: AbortSignal): Record<string, unknown> => {
     const header = capture.agent.session.requestHeader()
     const config = header?.config
+    // Retired field: newer lines carry the system prompt as derived history
+    // (a `system/message` surface event) rather than on the header.
+    const legacySystem = legacyHeaderSystem(header)
     return {
       provider: config?.provider ?? deps.provider(),
       model: config?.model ?? deps.model(),
       messages,
-      ...(header?.system !== undefined && { system: header.system }),
+      ...(legacySystem !== undefined && { system: legacySystem }),
       ...(config?.reasoningEffort !== undefined && { reasoningEffort: config.reasoningEffort }),
       ...(config?.temperature !== undefined && { temperature: config.temperature }),
       ...(config?.maxTokens !== undefined && { maxTokens: config.maxTokens }),

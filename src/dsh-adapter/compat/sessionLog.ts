@@ -55,13 +55,13 @@ import {
   existsSync,
   openSync,
   readdirSync,
-  readFileSync,
   readSync,
   realpathSync,
   rmSync,
 } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { logForDebugging } from '../../utils/debug.js'
 import { homeDir } from '../../utils/paths.js'
 
 /**
@@ -105,14 +105,92 @@ function isSafeSessionId(sessionId: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sessionId)
 }
 
+/** Zstd artifact suffix, stripped before a basename parses as a generation. */
+const ZSTD_SUFFIX = '.zstd'
+
 /**
- * Locate a session's log by scanning workspace directories for the session
- * id — deliberately NOT replicating the persistence plugin's workspace-key
- * sanitization, so the helpers survive upstream key-scheme changes.
- * @param sessionId - Session id (directory name under each workspace dir).
- * @returns Absolute path of session.jsonl.zstd, or undefined when absent.
+ * Upstream's canonical generation basename, mirrored verbatim from
+ * `@deepseek-ai/dsh-session-format`'s `CANONICAL_LOG_FILENAME`. Generation 0
+ * keeps the original `session.jsonl`; every later generation carries a
+ * lowercase numeric `.vN` component. Matching upstream's own pattern makes
+ * the rejections free: `.v0`, leading zeros, uppercase, and temporary or
+ * double-suffixed names are all non-canonical and never selected.
+ *
+ * Mirrored rather than imported because this module must stay importable
+ * against ANY reachable dsh-session copy — the invariant
+ * ensureLegacySessionEventTypes already depends on — so it takes no static
+ * upstream dependency. verify:session-generations diffs this pattern against
+ * upstream's own parser to keep the copy honest.
  */
-export function findSessionLogFile(sessionId: string): string | undefined {
+const CANONICAL_LOG_BASENAME = /^session(?:\.v([1-9][0-9]*))?\.jsonl$/u
+
+/**
+ * Read one session-directory entry as a format generation.
+ * @param filename - A basename inside a session directory.
+ * @returns Its generation and declared encoding, or undefined when the name
+ *   is not a canonical committed generation.
+ */
+function parseGenerationArtifact(
+  filename: string,
+): { generation: number; compressed: boolean } | undefined {
+  const compressed = filename.endsWith(ZSTD_SUFFIX)
+  const bare = compressed ? filename.slice(0, -ZSTD_SUFFIX.length) : filename
+  const match = CANONICAL_LOG_BASENAME.exec(bare)
+  if (match === null) return undefined
+  if (match[1] === undefined) return { generation: 0, compressed }
+  const generation = Number(match[1])
+  return Number.isSafeInteger(generation) ? { generation, compressed } : undefined
+}
+
+/**
+ * Select one session directory's live artifact: the numerically highest
+ * committed generation, preferring the compressed twin when one generation
+ * exists in both encodings.
+ *
+ * Both generations genuinely coexist after an upstream migration, so a
+ * first-match read would return a STALE log — selection by highest
+ * generation is a correctness requirement, not a preference. Deliberate
+ * divergence from upstream's `resolveGenerationInDirectory`, which throws on
+ * an opposite-encoding canonical entry: this reader is tolerant and
+ * read-only, so a mixed directory yields its best readable candidate rather
+ * than failing the whole listing.
+ * @param dir - A session directory (`<root>/<workspace>/<id>`).
+ * @returns The artifact to read, or undefined when the directory holds none.
+ */
+function resolveGenerationInDir(dir: string): SessionLogFile | undefined {
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return undefined
+  }
+  let best: { generation: number; compressed: boolean; path: string } | undefined
+  for (const entry of entries) {
+    const parsed = parseGenerationArtifact(entry)
+    if (parsed === undefined) continue
+    const better =
+      best === undefined ||
+      parsed.generation > best.generation ||
+      (parsed.generation === best.generation && parsed.compressed && !best.compressed)
+    if (better) best = { ...parsed, path: join(dir, entry) }
+  }
+  if (best === undefined) return undefined
+  // Encoding stays content-derived, never extension-derived: a `.zstd` name
+  // holding plain text (or the reverse) must still read correctly.
+  return sniffLogFile(best.path) ?? { path: best.path, compressed: best.compressed }
+}
+
+/**
+ * Locate a session's live log artifact by scanning workspace directories for
+ * the session id — deliberately NOT replicating the persistence plugin's
+ * workspace-key sanitization, so the helpers survive upstream key-scheme
+ * changes. Roots are scanned in `sessionsRoots()` order, so an explicit
+ * DSH_TUI_SESSION_ROOT always outranks the defaults.
+ * @param sessionId - Session id (directory name under each workspace dir).
+ * @returns The artifact with its content-sniffed encoding, or undefined when
+ *   no committed generation exists for the id.
+ */
+export function findSessionLogArtifact(sessionId: string): SessionLogFile | undefined {
   if (!isSafeSessionId(sessionId)) return undefined
   for (const root of sessionsRoots()) {
     let workspaces: string[]
@@ -122,11 +200,24 @@ export function findSessionLogFile(sessionId: string): string | undefined {
       continue
     }
     for (const ws of workspaces) {
-      const candidate = join(root, ws, sessionId, 'session.jsonl.zstd')
-      if (existsSync(candidate)) return candidate
+      const found = resolveGenerationInDir(join(root, ws, sessionId))
+      if (found !== undefined) return found
     }
   }
+  logForDebugging(`sessions: no committed generation found for session ${sessionId}`)
   return undefined
+}
+
+/**
+ * Path-only sibling of {@link findSessionLogArtifact} for the offline
+ * rename/delete and title callers. Resolves ANY encoding: a
+ * `compression:"none"` store used to leave those helpers reporting
+ * `'unavailable'` forever, because only the zstd name was probed.
+ * @param sessionId - Session id (directory name under each workspace dir).
+ * @returns Absolute artifact path, or undefined when absent.
+ */
+export function findSessionLogFile(sessionId: string): string | undefined {
+  return findSessionLogArtifact(sessionId)?.path
 }
 
 /* ------------------------------------------------------------------------- *\
@@ -149,13 +240,67 @@ export function findSessionLogFile(sessionId: string): string | undefined {
  * plugin's own real dsh-session is installed.
  */
 type StorageDecoder = (value: unknown) => SessionEvent[]
-let cachedDecoder: StorageDecoder | undefined
-function decodeStorageRecord(value: unknown): SessionEvent[] {
-  if (cachedDecoder === undefined) {
-    const req = createRequire(import.meta.url)
-    cachedDecoder = (req('@deepseek-ai/dsh-session') as { decodeStorageRecord: StorageDecoder }).decodeStorageRecord
+
+/** Packed storage tags: the only rows that ever expanded to many events. */
+const PACKED_ROW_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool-call-chunks'])
+
+/**
+ * Resolution is cached as an OUTCOME, not as the function: `undefined` used
+ * to mean "uncached", so a copy without the export re-`require`d on every
+ * single row of every log.
+ */
+let decoderResolution: { decoder: StorageDecoder | undefined } | undefined
+
+/** The reachable dsh-session copy's expander, when it still ships one. */
+function resolveStorageDecoder(): StorageDecoder | undefined {
+  if (decoderResolution === undefined) {
+    let decoder: StorageDecoder | undefined
+    try {
+      const req = createRequire(import.meta.url)
+      const mod: unknown = req('@deepseek-ai/dsh-session')
+      const candidate =
+        mod !== null && typeof mod === 'object'
+          ? (mod as Record<string, unknown>)['decodeStorageRecord']
+          : undefined
+      if (typeof candidate === 'function') decoder = candidate as StorageDecoder
+    } catch {
+      // No resolvable copy — fall through to the local single-row decode.
+    }
+    decoderResolution = { decoder }
+    if (decoder === undefined) {
+      logForDebugging('sessions: dsh-session exposes no decodeStorageRecord; decoding one row per event')
+    }
   }
-  return cachedDecoder(value)
+  return decoderResolution.decoder
+}
+
+/**
+ * Expand one storage record into events.
+ *
+ * Upstream's expander is preferred whenever the reachable copy exports it —
+ * it owns the packed-row layout. The export was removed at the 0.1.5 line
+ * (chunk runs no longer pack; a v3 row is exactly one event), and because it
+ * is reached lazily through createRequire, `tsc` cannot see the removal: an
+ * unconditional call throws on the first row of every log and degrades every
+ * session to "unreadable".
+ *
+ * Without the expander a packed row must FAIL the read rather than yield
+ * itself: silently dropping an assistant stream would make the transcript
+ * wrong, which is worse than reporting it unreadable.
+ * @param value - One parsed storage record.
+ * @returns The record's events, in log order.
+ */
+function decodeStorageRecord(value: unknown): SessionEvent[] {
+  const upstream = resolveStorageDecoder()
+  if (upstream !== undefined) return upstream(value)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('session log record is not an event envelope')
+  }
+  const type = (value as Record<string, unknown>)['type']
+  if (typeof type === 'string' && PACKED_ROW_TYPES.has(type)) {
+    throw new Error(`packed storage row "${type}" needs an upstream expander this copy does not ship`)
+  }
+  return [value as SessionEvent]
 }
 
 /** I/O slice for streamed log reads. */
@@ -175,38 +320,10 @@ const MAX_FRAME_BYTES = 64 * 1024 * 1024
 const MAX_FRAME_TEXT_BYTES = 64 * 1024 * 1024
 
 /** A located session log and its on-disk encoding. */
-interface SessionLogFile {
+export interface SessionLogFile {
   readonly path: string
-  /** true for session.jsonl.zstd (default), false for compression:"none". */
+  /** true for a zstd-framed artifact, false for compression:"none". */
   readonly compressed: boolean
-}
-
-/**
- * Dual-encoding sibling of {@link findSessionLogFile} for the bounded tree
- * reader: also probes `session.jsonl` (a `compression:"none"` backend),
- * which the rename/delete/title-string path has no use for. Same multi-root
- * scan and id whitelist; compressed still wins when both exist.
- * @param sessionId - Session id (directory name under each workspace dir).
- * @returns The log path and encoding, or undefined when absent.
- */
-function findSessionLogFileAnyEncoding(sessionId: string): SessionLogFile | undefined {
-  if (!isSafeSessionId(sessionId)) return undefined
-  for (const root of sessionsRoots()) {
-    let workspaces: string[]
-    try {
-      workspaces = readdirSync(root)
-    } catch {
-      continue
-    }
-    for (const ws of workspaces) {
-      const dir = join(root, ws, sessionId)
-      const compressed = join(dir, 'session.jsonl.zstd')
-      if (existsSync(compressed)) return { path: compressed, compressed: true }
-      const plain = join(dir, 'session.jsonl')
-      if (existsSync(plain)) return { path: plain, compressed: false }
-    }
-  }
-  return undefined
 }
 
 /**
@@ -498,7 +615,29 @@ function resolveLocatedPath(hint: string): SessionLogFile | undefined {
   if (direct !== undefined) return direct
   const twin = `${hint}.zstd`
   if (existsSync(twin)) return { path: twin, compressed: true }
-  return undefined
+  // The hint names the CURRENT format generation — upstream's locate() builds
+  // it from SESSION_FORMAT_VERSION — so it does not exist for a session still
+  // stored at an older generation. Correct ONLY the generation component, and
+  // only inside the backend's own directory: substituting a same-id copy from
+  // another root could surface a stale log from a different configuration.
+  const sibling = resolveGenerationInDir(dirname(hint))
+  if (sibling !== undefined) {
+    logForDebugging(
+      `sessions: locate() named a missing generation (${hint}); reading ${sibling.path}`,
+    )
+  }
+  return sibling
+}
+
+/**
+ * Path-only resolution of a backend `locate()` hint, for callers that need a
+ * filesystem path rather than a reader handle. Applies the same
+ * generation correction inside the backend's own directory.
+ * @param hint - Absolute path from SessionPersistence.locate().
+ * @returns A readable artifact path, or undefined when none materialized.
+ */
+export function resolveBackendArtifactPath(hint: string): string | undefined {
+  return resolveLocatedPath(hint)?.path
 }
 
 /** Outcome of reading an EXISTING log through the bounded reader. */
@@ -517,6 +656,13 @@ export interface SessionLogRead {
    *  `events` keeps the partial prefix collected before the failure, for
    *  diagnostics; callers building trees ignore it. */
   readonly failed?: boolean
+  /** Exact inherited prefix length, from the log's own
+   *  `session/end-seed` boundary carrying `inherited: true` — the seq that
+   *  event occupies. Undefined when the log has no such boundary (not a
+   *  fork) or the read stopped before reaching it. Never inferred from
+   *  `isSeeded`, log length, or a bare `session/end-seed`: 12 sessions in a
+   *  real store carry that event with empty data and no parent. */
+  readonly inheritedCut?: number
 }
 
 /**
@@ -539,6 +685,9 @@ function readEvents(
   }
   let scanned = 0
   const events: SessionEvent[] = []
+  let inheritedCut: number | undefined
+  const cut = (): { inheritedCut?: number } =>
+    inheritedCut === undefined ? {} : { inheritedCut }
   try {
     for (const record of logRecords(fd, file.compressed)) {
       for (const event of decodeStorageRecord(record)) {
@@ -548,9 +697,18 @@ function readEvents(
         // (ignorable-marked activity frames) forces a full parse just
         // to collect a handful of events, blocking the TUI on panel open.
         scanned += 1
-        if (scanned > maxScanned) return { events, complete: false, scanned }
+        if (scanned > maxScanned) return { events, complete: false, scanned, ...cut() }
         const envelope = event as Record<string, unknown>
         if (typeof envelope['seq'] !== 'number' || envelope['ignorable'] === true) continue
+        // The fork boundary, observed for free on the walk the reader already
+        // makes. Recorded BEFORE the skip below so the marker itself survives.
+        if (
+          inheritedCut === undefined &&
+          envelope['type'] === 'session/end-seed' &&
+          isInheritedSeedBoundary(envelope['data'])
+        ) {
+          inheritedCut = envelope['seq'] as number
+        }
         // Inherited-prefix skip (session-tree dedup): seqs an ancestor
         // already shows are not collected. They still cost the scan budget
         // (their bytes were read and parsed), but NOT the event budget — a
@@ -558,19 +716,28 @@ function readEvents(
         // small forks of a 70k-event parent both stay visible. Titles still
         // collect below the cutoff: branch-head labels need them and they
         // never extract into entries.
-        if ((envelope['seq'] as number) < skipBelowSeq && envelope['type'] !== 'session/title') continue
+        //
+        // The cut stops the skip: seq dedup is only valid BELOW the fork
+        // point, because past it the child's events are its own and merely
+        // share the parent's seq space. Without this, a fork of a long
+        // parent hides nearly all of its own content.
+        if (
+          inheritedCut === undefined &&
+          (envelope['seq'] as number) < skipBelowSeq &&
+          envelope['type'] !== 'session/title'
+        ) continue
         // Budget check BEFORE the push: an exact-fit log reports complete,
         // and only a surviving (maxEvents+1)-th event marks truncation.
-        if (events.length >= maxEvents) return { events, complete: false, scanned }
+        if (events.length >= maxEvents) return { events, complete: false, scanned, ...cut() }
         events.push(event)
       }
     }
-    return { events, complete: true, scanned }
+    return { events, complete: true, scanned, ...cut() }
   } catch {
     // An EXISTING but undecodable log (corruption, over-cap frame, decode
     // bomb): fail closed — never silently empty, never eligible for an
     // unbounded fallback re-read.
-    return { events, complete: false, scanned, failed: true }
+    return { events, complete: false, scanned, failed: true, ...cut() }
   } finally {
     try {
       closeSync(fd)
@@ -681,9 +848,93 @@ export function readSessionEventsFromLog(
   maxScanned: number = defaultMaxScanned(maxEvents),
   skipBelowSeq: number = 0,
 ): SessionLogRead | undefined {
-  const file = findSessionLogFileAnyEncoding(sessionId)
+  const file = findSessionLogArtifact(sessionId)
   if (file === undefined) return undefined
   return readEvents(file, maxEvents, maxScanned, skipBelowSeq)
+}
+
+/**
+ * Whether a `session/end-seed` payload marks an INHERITED prefix.
+ *
+ * The discriminator is `inherited === true`, not the event's presence: in a
+ * real 121-session store, 12 unseeded sessions with no parent carry
+ * `session/end-seed` with empty data, and treating those as forks would
+ * attach unrelated roots to each other. Upstream validates the same rule
+ * (its v2→v3 migration rejects a non-true `inherited`).
+ * @param data - The event's `data` payload.
+ * @returns True only for an explicit inherited-seed boundary.
+ */
+function isInheritedSeedBoundary(data: unknown): boolean {
+  if (data === null || typeof data !== 'object') return false
+  return (data as Record<string, unknown>)['inherited'] === true
+}
+
+/**
+ * Envelope budget for the standalone boundary probe. A real store's largest
+ * observed cut was 27, so this is ~150× headroom; on exhaustion the probe
+ * reports `undefined` (today's detached behavior) rather than guessing.
+ */
+export const SEED_BOUNDARY_MAX_SCANNED = 4096
+
+/**
+ * Read ONLY a log's inherited-prefix cut, for callers that need the fork
+ * boundary without a full read (a budget-exhausted or unreadable branch
+ * still has to anchor at the right point instead of detaching).
+ *
+ * A full read already reports the same value for free on
+ * {@link SessionLogRead.inheritedCut}; prefer that when the read happens.
+ * @param target - A located artifact, or an absolute path to resolve.
+ * @param maxScanned - Envelope cap for this probe.
+ * @returns The cut, or undefined when the log carries no inherited boundary
+ *   within the budget.
+ */
+export function readInheritedCutFrom(
+  target: SessionLogFile | string,
+  maxScanned: number = SEED_BOUNDARY_MAX_SCANNED,
+): number | undefined {
+  const file = typeof target === 'string' ? resolveLocatedPath(target) : target
+  if (file === undefined) return undefined
+  let fd: number | undefined
+  try {
+    fd = openSync(file.path, 'r')
+  } catch {
+    return undefined
+  }
+  let scanned = 0
+  try {
+    for (const record of logRecords(fd, file.compressed)) {
+      for (const event of decodeStorageRecord(record)) {
+        scanned += 1
+        if (scanned > maxScanned) return undefined
+        const envelope = event as Record<string, unknown>
+        if (typeof envelope['seq'] !== 'number' || envelope['ignorable'] === true) continue
+        if (
+          envelope['type'] === 'session/end-seed' &&
+          isInheritedSeedBoundary(envelope['data'])
+        ) {
+          return envelope['seq'] as number
+        }
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {
+      // A close failure leaves nothing actionable — the probe already ended.
+    }
+  }
+}
+
+/** Locate a session log by id and read its inherited-prefix cut. */
+export function readInheritedCutForSession(
+  sessionId: string,
+  maxScanned: number = SEED_BOUNDARY_MAX_SCANNED,
+): number | undefined {
+  const file = findSessionLogArtifact(sessionId)
+  return file === undefined ? undefined : readInheritedCutFrom(file, maxScanned)
 }
 
 function seedLengthOfPhysicalHeader(record: unknown): number | undefined {
@@ -725,38 +976,42 @@ export function readPhysicalHeaderSeedLength(path: string): number | undefined {
 
 /** Locate a session log by id and read its physical header `seedLength`. */
 export function readPhysicalHeaderSeedLengthForSession(sessionId: string): number | undefined {
-  const file = findSessionLogFileAnyEncoding(sessionId)
+  const file = findSessionLogArtifact(sessionId)
   if (file === undefined) return undefined
   return readPhysicalHeaderSeedLength(file.path)
 }
 
 /**
- * Decode a (possibly multi-frame) zstd jsonl log. Frames are split by magic
- * scan; any frame failing to decode or any line failing to parse throws, so
- * callers abort instead of acting on a log they did not fully understand.
- * @param buf - Raw file bytes.
- * @returns Parsed event envelopes, in log order.
+ * Read one log's storage rows, in log order, from either encoding.
+ *
+ * Replaces a whole-file magic scan: this walks zstd frames STRUCTURALLY
+ * (see zstdFrames), so a magic sequence inside a compressed payload can no
+ * longer mis-split a frame, a torn final frame is dropped as uncommitted
+ * rather than failing the read, and the file streams in 64 KiB slices
+ * instead of being loaded and decompressed whole. Rows are returned
+ * unexpanded — callers here want `type`/`data`/`seq`, which is exactly what
+ * the previous decoder handed back.
+ * @param file - A located artifact with its encoding.
+ * @returns Parsed row objects, in log order. Throws on unreadable storage.
  */
-function decodeEvents(buf: Buffer): Record<string, unknown>[] {
-  const offsets: number[] = []
-  for (let i = 0; i + 4 <= buf.length; i++) {
-    if (buf.readUInt32LE(i) === ZSTD_MAGIC) offsets.push(i)
+function readLogRows(file: SessionLogFile): Record<string, unknown>[] {
+  const fd = openSync(file.path, 'r')
+  try {
+    const rows: Record<string, unknown>[] = []
+    for (const record of logRecords(fd, file.compressed)) {
+      if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+        throw new Error('session log line is not an event envelope')
+      }
+      rows.push(record as Record<string, unknown>)
+    }
+    return rows
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {
+      // A close failure leaves nothing actionable — the read already ended.
+    }
   }
-  if (offsets.length === 0) throw new Error('no zstd frame found')
-  return offsets.flatMap((start, i) => {
-    const end = i + 1 < offsets.length ? offsets[i + 1]! : buf.length
-    const text = zstdDecompressSync(buf.subarray(start, end)).toString('utf8')
-    return text
-      .split('\n')
-      .filter((line) => line.length > 0)
-      .map((line) => {
-        const parsed: unknown = JSON.parse(line)
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('session log line is not an event envelope')
-        }
-        return parsed as Record<string, unknown>
-      })
-  })
 }
 
 /**
@@ -832,9 +1087,9 @@ export function readSessionTitleFromLog(
   sessionId: string,
 ): { title?: string; hasUserMessage: boolean } | undefined {
   try {
-    const file = findSessionLogFile(sessionId)
+    const file = findSessionLogArtifact(sessionId)
     if (file === undefined) return undefined
-    const events = decodeEvents(readFileSync(file))
+    const events = readLogRows(file)
     let titled: string | undefined
     let firstUser: string | undefined
     let hasUserMessage = false
@@ -902,11 +1157,10 @@ function firstTextOfContent(content: unknown): string | undefined {
  */
 export function appendSessionTitle(sessionId: string, title: string): 'appended' | 'unavailable' {
   try {
-    const file = findSessionLogFile(sessionId)
+    const file = findSessionLogArtifact(sessionId)
     if (file === undefined) return 'unavailable'
-    const events = decodeEvents(readFileSync(file))
     let maxSeq = -1
-    for (const event of events) {
+    for (const event of readLogRows(file)) {
       const seq = event['seq']
       if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq
     }
@@ -918,8 +1172,13 @@ export function appendSessionTitle(sessionId: string, title: string): 'appended'
       time: Date.now(),
       data: { title },
     }
-    const frame = zstdCompressSync(Buffer.from(JSON.stringify(event) + '\n', 'utf8'))
-    appendFileSync(file, frame)
+    const line = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8')
+    // Encoding must match the artifact: the locator now resolves plain
+    // `session.jsonl` too, and appending a zstd frame to a text log would
+    // corrupt it. A generation-tagged artifact needs no special encoding —
+    // upstream reads the generation from the FILENAME and asserts it against
+    // the header, and an appended row changes neither.
+    appendFileSync(file.path, file.compressed ? zstdCompressSync(line) : line)
     return 'appended'
   } catch {
     return 'unavailable'

@@ -9,6 +9,12 @@ import { isSubagentToolName, parseJobOutputId, toolCommandOf, BACKGROUND_START_A
 import { ARGS_PREVIEW_LIMIT, harnessToolResultView, LOCAL_OUTPUT_LIMIT, prepareReplayEvents, preview, RESULT_PREVIEW_LIMIT, toolErrorText } from './transcript.js'
 import { estimateTokens, isTokenDelta, tokenDeltaChars, usageOutputTokens } from './usage.js'
 import { transcriptImagesOf, type TranscriptImage } from '../transcript-images.js'
+import {
+  asAssistantChunk,
+  eventType,
+  legacyHeaderSystem,
+  type AssistantChunkEvent,
+} from '../upstream-legacy.js'
 import { isPeakHour } from '../../deepseekPricing.js'
 import { t } from '../../i18n.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -356,14 +362,73 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     }
   }
 
+  /**
+   * A streamed assistant delta. `assistant/chunk` left the SessionEvent
+   * union when streaming stopped being persisted as separate events, but
+   * every older log is full of them and replaying one must still grow the
+   * live rows — so the branch is dispatched structurally instead of from a
+   * `case` the union can no longer express.
+   */
+  const applyAssistantChunk = (event: AssistantChunkEvent): void => {
+    if (handledAssistantChunks.has(event.seq)) return
+    handledAssistantChunks.add(event.seq)
+    const chunk = event.data.chunk
+    if (chunk.type === 'text-delta') {
+      if (chunk.text) {
+        // Fold the thinking preview while it is still in the live
+        // window (see foldLiveReasoning) — before this text grows the
+        // transcript and pushes the block into scrollback.
+        foldLiveReasoning('first text token')
+        const key = stepKey(event.data.turn, event.data.step)
+        const row = assistantRowsByStep.get(key) ?? ensureStreaming(event.seq)
+        assistantRowsByStep.set(key, row)
+        streaming = row
+        row.streaming = true
+        touchRow(row)
+        const before = row.text.length
+        appendTextDelta(row, chunk.text)
+        state.responseChars += Math.max(0, row.text.length - before)
+      }
+    } else if (chunk.type === 'reasoning-delta') {
+      if (chunk.text) {
+        const row = ensureReasoning(event.seq, event.data.turn, event.data.step)
+        appendTextDelta(row, chunk.text)
+      }
+    }
+    const step = tpsStep
+    if (
+      step !== undefined &&
+      step.turn === event.data.turn &&
+      step.step === event.data.step &&
+      isTokenDelta(chunk)
+    ) {
+      step.firstTokenTime ??= event.time
+      step.outputChars += tokenDeltaChars(chunk)
+      const elapsedMs = Math.max(0, event.time - step.firstTokenTime)
+      if (elapsedMs > 500) {
+        const decodeMs = tpsTurnDecodeMs + elapsedMs
+        const outputTokens = tpsTurnDecodeTokens + Math.ceil(step.outputChars / 4)
+        state.tps = outputTokens / (decodeMs / 1000)
+      }
+    }
+    updateSpinnerMode()
+  }
+
   const renderEvent = (event: SessionEvent): void => {
     // Top-level `goal/change` events are how the goal service actually
     // records durable goal mutations (create/edit/pause/resume/complete/
     // block/clear) — confirmed in production logs. The pinned peer's
     // SessionEvent union predates the type, so admit it structurally: the
     // goal chip and panel stay dark without this fold.
-    if ((event as { type: string }).type === 'goal/change') {
-      applyGoalChange((event as { data: GoalChangePayload }).data)
+    if (eventType(event) === 'goal/change') {
+      applyGoalChange((event as unknown as { data: GoalChangePayload }).data)
+      return
+    }
+    // Retired event type, still present in every older log — see
+    // applyAssistantChunk.
+    const legacyChunk = asAssistantChunk(event)
+    if (legacyChunk !== undefined) {
+      applyAssistantChunk(legacyChunk)
       return
     }
     switch (event.type) {
@@ -452,51 +517,6 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
             outputChars: 0,
           }
         }
-        break
-      }
-      case 'assistant/chunk': {
-        if (handledAssistantChunks.has(event.seq)) break
-        handledAssistantChunks.add(event.seq)
-        const chunk = event.data.chunk
-        if (chunk.type === 'text-delta') {
-          if (chunk.text) {
-            // Fold the thinking preview while it is still in the live
-            // window (see foldLiveReasoning) — before this text grows the
-            // transcript and pushes the block into scrollback.
-            foldLiveReasoning('first text token')
-            const key = stepKey(event.data.turn, event.data.step)
-            const row = assistantRowsByStep.get(key) ?? ensureStreaming(event.seq)
-            assistantRowsByStep.set(key, row)
-            streaming = row
-            row.streaming = true
-            touchRow(row)
-            const before = row.text.length
-            appendTextDelta(row, chunk.text)
-            state.responseChars += Math.max(0, row.text.length - before)
-          }
-        } else if (chunk.type === 'reasoning-delta') {
-          if (chunk.text) {
-            const row = ensureReasoning(event.seq, event.data.turn, event.data.step)
-            appendTextDelta(row, chunk.text)
-          }
-        }
-        const step = tpsStep
-        if (
-          step !== undefined &&
-          step.turn === event.data.turn &&
-          step.step === event.data.step &&
-          isTokenDelta(chunk)
-        ) {
-          step.firstTokenTime ??= event.time
-          step.outputChars += tokenDeltaChars(chunk)
-          const elapsedMs = Math.max(0, event.time - step.firstTokenTime)
-          if (elapsedMs > 500) {
-            const decodeMs = tpsTurnDecodeMs + elapsedMs
-            const outputTokens = tpsTurnDecodeTokens + Math.ceil(step.outputChars / 4)
-            state.tps = outputTokens / (decodeMs / 1000)
-          }
-        }
-        updateSpinnerMode()
         break
       }
       case 'assistant/message': {
@@ -859,8 +879,12 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         if (typeof effort === 'string') {
           state.reasoningEffort = effort
         }
-        if (typeof event.data.header.system === 'string') {
-          state.contextSegments.system = estimateTokens(event.data.header.system)
+        // Retired field: the system prompt became derived history (surface
+        // node 0, a `system/message` event) on newer lines, so this is the
+        // legacy source only and absence is not "no system prompt".
+        const legacySystem = legacyHeaderSystem(event.data.header)
+        if (legacySystem !== undefined) {
+          state.contextSegments.system = estimateTokens(legacySystem)
         }
         break
       }

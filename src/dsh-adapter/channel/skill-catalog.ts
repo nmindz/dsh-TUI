@@ -4,6 +4,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { isUserInvocable, renderSkillContent, type SkillSummary } from '@deepseek-ai/dsh-skill'
 import { HIDDEN_COMMAND_NAMES, isLocalCommandName, parseCommandName, LOCAL_COMMANDS, type LocalCommand, type LocalizedDescriptions } from '../../commands.js'
+import { acceptsAttachments } from '../upstream-legacy.js'
 import { t } from '../../i18n.js'
 import { serviceForAgent } from '../presets.js'
 import { hasCommandErrorCode, mapCommandError } from '../command-errors.js'
@@ -44,7 +45,7 @@ export function createSkillCatalog(
         if (!deps.owner.current()) return
         if (HIDDEN_COMMAND_NAMES.has(descriptor.name) || merged.some(command => command.name === descriptor.name)) continue
         const descriptions = deps.commandDescriptions(descriptor.name)
-        merged.push({ name: descriptor.name, description: descriptor.description, ...(descriptions === undefined ? {} : { descriptions }), tag: descriptor.input?.hint, external: true, acceptsImages: descriptor.input?.images === true, ...(registrations.has(descriptor.name) ? { skill: true } : {}) })
+        merged.push({ name: descriptor.name, description: descriptor.description, ...(descriptions === undefined ? {} : { descriptions }), tag: descriptor.input?.hint, external: true, acceptsImages: acceptsAttachments(descriptor.input), ...(registrations.has(descriptor.name) ? { skill: true } : {}) })
       }
     }
     if (!deps.owner.current() || target !== deps.agent()) return
