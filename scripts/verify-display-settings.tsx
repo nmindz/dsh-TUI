@@ -145,6 +145,7 @@ async function renderStatus(
       patchConsole: false,
     },
   )
+  // 固定窗:pacing 等首帧——render() 后 React 首次提交与 xterm 异步分块解析无单一可轮询锚点。
   await sleep(180)
   const output = harness.screen()
   await instance.unmount()
@@ -163,6 +164,7 @@ check('DEFAULT_STATUS_BAR keeps the intended compact defaults', () => {
     cache: true,
     cost: true,
     tokens: false,
+    cost: true,
     tps: false,
     gitBranch: false,
     sessionTitle: false,
@@ -173,6 +175,7 @@ check('DEFAULT_STATUS_BAR keeps the intended compact defaults', () => {
     activity: false,
     trajectory: false,
     shortcutHint: false,
+    pluginSegments: true,
   })
 })
 
@@ -424,6 +427,7 @@ async function renderToolBackground(toolBackground: 'none' | 'subtle' | 'strong'
       patchConsole: false,
     },
   )
+  // 固定窗:pacing 等首帧——同上；本例读的是 ANSI 写入流，锚点同样不唯一。
   await sleep(180)
   await instance.unmount()
   harness.term.dispose()

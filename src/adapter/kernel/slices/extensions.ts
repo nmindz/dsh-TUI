@@ -13,6 +13,8 @@ const statusDeclarations = Object.freeze([
   'host.status.set',
   'host.status.snapshot',
   'host.status.subscribe',
+  'host.status.set-segment',
+  'host.status.decorate-field',
 ])
 const shortcutsDeclarations = Object.freeze([
   'host.shortcuts.register',

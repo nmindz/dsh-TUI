@@ -92,7 +92,8 @@ Tool results are associated by `callId`, never guessed from array position.
 - **Replay coalescing**: consecutive token chunks are merged during history
   replay, avoiding repeated string growth for long streamed messages.
 - **Bounded caches**: transcript, render-node, and measurement caches are bounded;
-  removing a bound requires measured evidence.
+  removing a bound requires measured evidence. See
+  [Render cache budgets](rendering-performance.en.md) for how the budgets were sized.
 - **Zero-allocation hot paths**: the visibleRows pipeline (slice/filter/margins)
   is memoized on rows identity, length, and a Uint8Array streaming-bit
   fingerprint — zero array/Map allocations per scroll tick.

@@ -68,6 +68,10 @@ subagent dashboard, show-all, and todo fold are remappable in `/settings` → `d
 - Plugins provide the keyboard path for the same action through a slash command or `tuiShortcuts`.
 - A refused rich registration returns `undefined`; an admitted one returns a disposer that removes both the view and its Cordis effect.
 
+Plugins may also contribute text-only segments to the **status footer** through `tuiStatus.setSegment`: `{ key, text, color?, dim?, order?, detail?, tooltip? }`, with a placement of `footer-left` or `footer-right` (the former by default). Segments are structured text rather than React — the footer's width-stability and truncation contracts belong to the host, so a plugin supplies content and the host builds the cell. `color` is restricted to an allowlist of theme tokens (raw hex/ANSI is refused, so a segment stays readable after a theme switch), text is capped in terminal cells (40 per segment), and the whole surface is bounded by an 8-segment / 120-cell budget. Keys share one namespace with `set`/`registerView`, and a key may own exactly one surface. `detail` fills the supplemental row on hover; `tooltip` pops when the rendered text truncates. Segments append after the built-in fields of their group, so adding one never disturbs the stock order. `/settings → Show plugin segments` turns them off wholesale, and minimal mode never renders them. Feature-detect with `typeof status?.setSegment === 'function'` to degrade to the prompt-above line on older hosts.
+
+A plugin may also put icons on a **built-in** footer field through `tuiStatus.decorateField(field, { prefix?, suffix?, prefixByValue?, suffixByValue? })`. This is not a segment: the host keeps rendering the field, so its hover detail, tooltip, truncation and width behaviour are untouched and only text is added on either side — `model` still answers a hover with model/provider/context, and `cache` still answers with read/write/input. Decorating is therefore the way to add an icon without losing what the field already tells you; hiding a field and printing a replacement segment loses its hover, which a plugin cannot rebuild. The `*ByValue` maps key off the field's current value and win over the static side, which is how an icon tracks state a plugin cannot read (the reasoning-effort glyph differs for `low`/`high`/`xhigh`/`max`, and no seam exposes the live level). Keeping that a lookup table rather than a callback keeps plugin code off the render path, for the same reason segments are structured text rather than React. Only built-in field ids may be decorated, one decoration per field, owned by the registering activation; icon text is capped at 8 cells per side and a value map at 24 entries. Minimal mode drops decorations along with every other plugin contribution. `decorateField` is newer than `setSegment`, so feature-detect it the same way.
+
 ## Editing keys
 
 | Key | Behavior |
@@ -621,6 +625,7 @@ Additional forms:
 - `/effort` opens the reasoning-effort slider (←/→ adjusts live); `/effort <id>` sets a level directly; `/effort status` reports the current one.
 - `/model` opens a two-level picker:
   - A pinned **Recently used** group first — the last 10 switched models, persisted at `~/.dsh-tui/model-recents.json` — then provider groups.
+  - Provider groups cover every route the llm registry holds, including ones whose catalog is empty, which read as unavailable instead of disappearing.
   - `Enter` drills into a group's models, and a single provider with no recents skips straight to the list.
   - Switching = fork continuation, history preserved.
 - `/theme <name>` and `/theme status` are described in the theme guide.

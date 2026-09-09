@@ -83,6 +83,7 @@ Channel 只保留适合当前 TUI 的投影。长会话超过窗口后，旧行�
 - **虚拟化消息列表**：屏幕外行使用上一次测量的固定高度占位，不参与完整子树布局。
 - **回放合并**：历史回放时合并连续 token chunk，避免长流式消息触发二次字符串增长。
 - **有界缓存**：transcript、渲染节点和测量缓存有上限；移除上限前必须有测量证据。
+  预算取值依据见[渲染缓存与定尺依据](rendering-performance.md)。
 - **零分配热路径**：visibleRows 管线按 rows 身份、长度与 Uint8Array
   流式位指纹记忆化，每个滚动 tick 零数组/Map 分配。
 - **全局 LRU 缓存**：wrapText 与 markdown token 走全局 LRU 缓存跨挂载复用。

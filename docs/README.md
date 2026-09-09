@@ -30,6 +30,7 @@ The root README lists what ships; the details live here. Chinese files have no s
 | --- | --- | --- | --- |
 | 架构与限制 / Architecture & limitations | [architecture.md](architecture.md) | [architecture.en.md](architecture.en.md) | 运行链路、性能、安全边界与已知限制。 |
 | 会话挂载运行时 / Session mount runtime | [session-mount-runtime.md](session-mount-runtime.md) | [session-mount-runtime.en.md](session-mount-runtime.en.md) | 多 TUI 占用规则与本机账本。 |
+| 渲染缓存与定尺依据 / Render cache budgets | [rendering-performance.md](rendering-performance.md) | [rendering-performance.en.md](rendering-performance.en.md) | 渲染缓存预算的定尺依据。 |
 
 ## 插件 / Plugins
 

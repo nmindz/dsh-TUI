@@ -349,6 +349,7 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
 - `/model`：选择器。**切换 = fork 会话续聊**（历史保留、仅换路由，旧会话留在 `/resume`）；
   持久化 `~/.dsh-tui/model.json`。
 - 回合运行中切换会被拒绝。
+- 分组层列出 llm 注册表里的**全部**路由：目录为空的路由（未登录的 OAuth 路由、被抢占的路由、配置为空的目录）显示为「无可用模型」而不是被隐藏，回车会说明原因而不进入空列表。
 - `/preset` 可选：`standard`（默认全功能）、`ptc`、`minimal`（仅 bash+编辑器，无 compaction）、
   `cordis`、`liangshen`（梁神模式）。
   **已产生对话的会话不能切换**（blank-only）：选择只保存为下次 `/new` 的默认。
@@ -431,6 +432,21 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
 
 **TPS 仪表**（`statusBar.tps`，默认关）：流式中显示实时 gauge + `N tps`，回合后显示 sparkline；
 速度 **≥50 绿 / ≥20 黄 / <20 红**。
+
+**插件状态段与字段图标**（`statusBar.pluginSegments`，默认开）
+插件经 `tuiStatus.setSegment` 贡献的纯文本段，默认追加在同组内建字段之后——新增一段不会打乱既有顺序。悬停显示插件提供的补充说明。插件还能用 `tuiStatus.decorateField` 给**内建**字段加图标（如模型前的 🧠、推理强度前的档位符号）：宿主继续渲染该字段，所以 hover 详情原样保留——想加图标又不丢 `model`/`cache` 的悬停信息，就用装饰而不是拿段顶替。关掉此开关即整体隐藏段与图标，minimal 模式下一律不显示。详见 [interaction.md](interaction.md)。
+
+**页脚布局**（`statusBar.layout`，默认空 = 保持默认布局）
+逗号分隔的字段顺序，用于完全重排、隐藏或混排页脚。一旦填写即**压过上面所有字段开关**：只有列出的槽位会渲染，且按列出顺序排列。
+
+- 可用字段名：`model`、`tps`、`thinking`、`mode`、`cache`、`tokens`、`cost`、`ctx`、`goal`、`git`、`cwd`、`title`、`sessionId`（大小写不敏感），外加任意插件段的 key。
+- `|` 分隔符：之前的进左组，之后的右对齐；不写 `|` 则全部在左组。
+- `*` 通配符：展开所有未显式列出的插件段——布局写死之后再装的插件靠它才有位置。
+- 认不出的 token（拼错，或插件没注册）直接跳过，不会让页脚崩掉；启动日志会提示。
+- 设了 `layout` 就总是用左右双组渲染，`compact` 退化为纯缩写开关（cwd 只显示末段、ctx 百分比在前）。minimal 模式忽略 `layout`。
+- `jobs` 后台任务角标与 IDE 选区徽标不可寻址：它们是瞬时会话状态而非装饰，任何布局都不能隐藏。
+
+例：`model, ctx, |, my-plugin:tf, git, cwd`
 
 ### 5.3 /settings 设置编辑器
 

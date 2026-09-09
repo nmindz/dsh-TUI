@@ -361,6 +361,7 @@ Full-screen view of the whole session timeline (doesn't pollute scrollback); key
 - `/model`: selector. **Switching = fork the session** (history kept, only routing changes, the old session stays in `/resume`);
   persisted to `~/.dsh-tui/model.json`.
 - Switching is rejected mid-turn.
+- The group level lists **every** route the llm registry holds: a route with an empty catalog (an OAuth route not signed in, a route that lost its claim, an empty configured catalog) reads as "no models available" instead of disappearing, and Enter explains why rather than opening an empty list.
 - `/preset` options: `standard` (default full features), `ptc`, `minimal` (bash+editor only, no compaction),
   `cordis`, `liangshen` (Liangshen mode).
   **A session that already has messages can't switch** (blank-only): the choice only becomes the default for the next `/new`.
@@ -449,6 +450,21 @@ An empty session shows the whale logo area at the top (scrolls away with the con
 
 **TPS gauge** (`statusBar.tps`, default off): streaming shows a live gauge + `N tps`, after the turn a sparkline;
 speed **≥50 green / ≥20 yellow / <20 red**.
+
+**Plugin segments and field icons** (`statusBar.pluginSegments`, default on)
+Plain-text segments plugins contribute through `tuiStatus.setSegment` append after the built-in fields of the same group by default — adding one never reshuffles the existing order. Hover shows the plugin's own detail. A plugin can also put an icon on a **built-in** field with `tuiStatus.decorateField` (a 🧠 before the model, a tier glyph before the reasoning effort): the host keeps rendering that field, so its hover detail survives — to add an icon without losing the `model`/`cache` hover, decorate rather than replace it with a segment. Turning the switch off hides segments and icons together; minimal mode never shows them. See [interaction.en.md](interaction.en.md).
+
+**Footer layout** (`statusBar.layout`, default empty = default arrangement)
+A comma-separated field order that rearranges, hides, or mixes the footer. Once set it **overrides every field switch above**: only listed slots render, in listed order.
+
+- Field names: `model`, `tps`, `thinking`, `mode`, `cache`, `tokens`, `cost`, `ctx`, `goal`, `git`, `cwd`, `title`, `sessionId` (case-insensitive), plus the key of any plugin segment.
+- `|` separator: tokens before it go left, tokens after it are right-aligned; without a `|` everything goes left.
+- `*` wildcard: expands every plugin segment the layout never named — that is what gives a plugin installed after the layout was written a place.
+- Unrecognized tokens (a typo, or a plugin that never registered) are skipped rather than breaking the footer; the startup log names them.
+- A layout always renders through the two-group row, and `compact` degrades to an abbreviation switch (cwd basename, percent-first ctx). Minimal mode ignores `layout`.
+- The `jobs` background-job chip and the IDE selection badge are not addressable: they are transient session state rather than chrome, so no layout may hide them.
+
+Example: `model, ctx, |, my-plugin:tf, git, cwd`
 
 ### 5.3 The /settings editor
 
