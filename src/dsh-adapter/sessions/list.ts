@@ -27,6 +27,7 @@ import {
 } from './digest.js'
 import { fileFacts } from './frames.js'
 import { classify, readHeader, type RawSessionHeader } from './header.js'
+import { logForDebugging } from '../../utils/debug.js'
 import { findSessionLogFile } from '../compat/sessionLog.js'
 import { readIndex, writeIndex, type DerivedEntry, type SessionIndex } from './store.js'
 import type { SessionSummary } from './types.js'
@@ -43,9 +44,13 @@ const TITLE_SCAN_BUDGET_BYTES = 16 * 1024 * 1024
  * degrades is worth more than one that throws.
  */
 export interface SessionSource {
-  /** Headers plus per-log change tokens — the contract built for this. */
+  /** Snapshots, when a backend version exposes them under this name. */
   listSnapshots?: (signal?: AbortSignal) => Promise<readonly unknown[]>
-  /** Headers alone, for a backend or version without snapshots. */
+  /**
+   * The upstream listing. `SessionPersistence.list()` answers snapshots
+   * (`{ header, revision, … }`); older backends answered bare headers. Both
+   * are accepted — see {@link readListed}.
+   */
   list?: (signal?: AbortSignal) => Promise<readonly unknown[]>
   /** Absolute artifact path for one header; absent for storeless backends. */
   locate?: (meta: unknown) => unknown
@@ -58,15 +63,30 @@ interface Listed {
   readonly revision: string | undefined
 }
 
-/** Pull `{ header, revision }` out of one `listSnapshots()` element. */
-function readSnapshot(value: unknown): Listed | undefined {
+/**
+ * Read one listing element, accepting either wrapper shape.
+ *
+ * A snapshot nests its header under `header` and carries the backend's change
+ * token; a bare header carries `id` itself. Trying the nested form first keeps
+ * `raw` pointing at whichever object `locate()` expects.
+ * @param value - One element of a `list()` / `listSnapshots()` result.
+ * @returns The header with its change token, or undefined when neither shape
+ *   yields an identifiable header.
+ */
+function readListed(value: unknown): Listed | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const record = value as Record<string, unknown>
-  const raw = record['header']
-  const header = readHeader(raw)
-  if (header === undefined) return undefined
-  const revision = record['revision']
-  return { header, raw, revision: typeof revision === 'string' ? revision : undefined }
+  const nested = readHeader(record['header'])
+  if (nested !== undefined) {
+    const revision = record['revision']
+    return {
+      header: nested,
+      raw: record['header'],
+      revision: typeof revision === 'string' ? revision : undefined,
+    }
+  }
+  const bare = readHeader(value)
+  return bare === undefined ? undefined : { header: bare, raw: value, revision: undefined }
 }
 
 /**
@@ -79,20 +99,25 @@ function readSnapshot(value: unknown): Listed | undefined {
  * append-only log; only the authority differs.
  */
 async function enumerate(source: SessionSource, signal?: AbortSignal): Promise<Listed[]> {
-  if (typeof source.listSnapshots === 'function') {
-    const snapshots = await source.listSnapshots(signal)
-    return snapshots.map(readSnapshot).filter((entry): entry is Listed => entry !== undefined)
+  const listing =
+    typeof source.listSnapshots === 'function' ? source.listSnapshots
+      : typeof source.list === 'function' ? source.list
+      : undefined
+  if (listing === undefined) {
+    logForDebugging('sessions: persistence exposes neither listSnapshots() nor list()')
+    return []
   }
-  if (typeof source.list === 'function') {
-    const headers = await source.list(signal)
-    return headers
-      .map((raw): Listed | undefined => {
-        const header = readHeader(raw)
-        return header === undefined ? undefined : { header, raw, revision: undefined }
-      })
-      .filter((entry): entry is Listed => entry !== undefined)
+  const elements = await listing.call(source, signal)
+  const listed = elements.map(readListed).filter((entry): entry is Listed => entry !== undefined)
+  // Dropping every element means the wrapper shape is unrecognized, not that
+  // history is empty; that reads to the user as "no sessions".
+  if (listed.length === 0 && elements.length > 0) {
+    logForDebugging(
+      `sessions: no identifiable header in ${elements.length} listing element(s); ` +
+        `keys=${Object.keys((elements[0] ?? {}) as object).join(',')}`,
+    )
   }
-  return []
+  return listed
 }
 
 /**
@@ -139,7 +164,10 @@ export async function listSummaries(
   let listed: Listed[]
   try {
     listed = await enumerate(source, signal)
-  } catch {
+  } catch (error: unknown) {
+    // A backend that cannot list must not take the screen down with it, but an
+    // empty list renders as "no history" — so name the cause on the debug path.
+    logForDebugging(`sessions: listing failed, reporting no sessions — ${String(error)}`)
     return []
   }
 

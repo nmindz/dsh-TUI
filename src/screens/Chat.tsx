@@ -22,6 +22,7 @@ import {
   modelPickerLanding,
   recentCatalogModels,
   RECENTS_GROUP_PROVIDER,
+  type ModelGroupRow,
 } from '../modelGroups.js'
 import { readModelRecents, recordModelUse, type ModelRecentsRef } from '../modelRecents.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
@@ -381,6 +382,18 @@ export function Chat({
     subscribeStatus,
     () => statusContributions.getViewSnapshot(),
   )
+  // Footer segments ride the same store; StatusLine merges them into its
+  // field groups (or resolves them by key when a layout is set).
+  const statusSegments = React.useSyncExternalStore(
+    subscribeStatus,
+    () => statusContributions.getSegmentSnapshot(),
+  )
+  // Plugin icons for built-in footer fields; the host still renders each
+  // field, so hover details and truncation stay host-owned.
+  const statusDecorations = React.useSyncExternalStore(
+    subscribeStatus,
+    () => statusContributions.getDecorationSnapshot(),
+  )
   // Shortcut handler failures surface as toasts (the registry also logs
   // them); the hook is re-pointed on every mount so a stale closure never
   // outlives its channel.
@@ -460,6 +473,10 @@ export function Chat({
   const [models, setModels] = React.useState<readonly LlmModelInfo[]>([])
   /** Provider display identities for the /model group level; refreshed alongside `models`. */
   const [providerInfos, setProviderInfos] = React.useState<readonly LlmProviderInfo[]>([])
+  /** True once a catalog observation has landed. The picker's loading pane
+   *  keys off this, never off an empty model list — every registered route
+   *  listing nothing is a real (and reportable) state, not a pending fetch. */
+  const [modelCatalogLoaded, setModelCatalogLoaded] = React.useState(false)
   /** /model 最近使用分组：成功切换即记录（去重置顶，上限 10），重启保留。 */
   const [modelRecents, setModelRecents] = React.useState<readonly ModelRecentsRef[]>(() => readModelRecents())
   /** Two-level /model: the drilled-in provider route; undefined = group level.
@@ -485,6 +502,28 @@ export function Chat({
     if (activeModelGroup === RECENTS_GROUP_PROVIDER) return recentCatalogModels(modelRecents, models)
     return models.filter(model => model.provider === activeModelGroup)
   }, [models, modelRecents, activeModelGroup])
+  /** Drill into one top-level group row (Enter and click share this path).
+   *  A registered route that lists nothing refuses the drill and says so —
+   *  an empty second level would read as a rendering fault instead of the
+   *  route state it is. The recents group opens on its most-recent entry; a
+   *  provider group on its current model when it owns one, else its first. */
+  const openModelGroup = (group: ModelGroupRow): void => {
+    if (group.provider !== RECENTS_GROUP_PROVIDER && group.count === 0) {
+      channel.notify(t('model-group-unavailable', { name: group.label }), { color: 'warning', timeoutMs: 8000 })
+      return
+    }
+    setModelGroup(group.provider)
+    if (group.provider === RECENTS_GROUP_PROVIDER) {
+      dispatchOverlay({ type: 'set-index', kind: 'model', index: 0 })
+      return
+    }
+    const landing = modelPickerLanding(
+      models.filter(model => model.provider === group.provider),
+      channel.provider,
+      channel.model,
+    )
+    dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
+  }
   /** Switch + record: every successful switch feeds the /model recents group
    *  (picker Enter/click, `/model provider/id`, the wizard's live switch,
    *  and /reload's applied model all ride this one path). */
@@ -1694,19 +1733,24 @@ export function Chat({
         // group row; a single-provider catalog without a meaningful recents
         // list drills straight into its model list (pre-grouping UX).
         {
-          const landing = modelPickerLanding(models, channel.provider, channel.model, recentsNow)
+          const landing = modelPickerLanding(models, channel.provider, channel.model, recentsNow, providerInfos)
           setModelGroup(landing.group)
           setModelPickerDirect(landing.group !== undefined)
           dispatchOverlay({ type: 'open', overlay: { kind: 'model', index: landing.index } })
         }
-        void channel.listModels().then((list) => {
-          setModels(list)
-          const landing = modelPickerLanding(list, channel.provider, channel.model, recentsNow)
-          setModelGroup(landing.group)
-          setModelPickerDirect(landing.group !== undefined)
-          dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
-        })
-        void channel.listProviders().then(setProviderInfos).catch(() => setProviderInfos([]))
+        // Both halves land together: the group rows come from the registry
+        // listing, so a landing computed against a stale provider list could
+        // focus a row the fresh catalog renders elsewhere.
+        void Promise.all([channel.listModels(), channel.listProviders().catch(() => [])])
+          .then(([list, infos]) => {
+            setModels(list)
+            setProviderInfos(infos)
+            setModelCatalogLoaded(true)
+            const landing = modelPickerLanding(list, channel.provider, channel.model, recentsNow, infos)
+            setModelGroup(landing.group)
+            setModelPickerDirect(landing.group !== undefined)
+            dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
+          })
         return true
       }
       case 'skills': {
@@ -1772,8 +1816,12 @@ export function Chat({
           if (outcome === 'added' || outcome === 'updated'
             || outcome === 'deleted' || outcome === 'signed-out') {
             channel.invalidateModelCompletion()
-            void channel.listModels().then(setModels)
-            void channel.listProviders().then(setProviderInfos).catch(() => setProviderInfos([]))
+            void Promise.all([channel.listModels(), channel.listProviders().catch(() => [])])
+              .then(([list, infos]) => {
+                setModels(list)
+                setProviderInfos(infos)
+                setModelCatalogLoaded(true)
+              })
           }
         }).catch(() => {
           // The wizard notifies on every handled failure; this only swallows
@@ -2906,19 +2954,7 @@ export function Chat({
             dispatchOverlay({ type: 'close' })
             return
           }
-          setModelGroup(group.provider)
-          // The recents group opens on its most-recent entry; a provider
-          // group on its current model when it owns one, else its first row.
-          if (group.provider === RECENTS_GROUP_PROVIDER) {
-            dispatchOverlay({ type: 'set-index', kind: 'model', index: 0 })
-            return
-          }
-          const landing = modelPickerLanding(
-            models.filter(model => model.provider === group.provider),
-            channel.provider,
-            channel.model,
-          )
-          dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
+          openModelGroup(group)
           return
         }
         const model = groupModels[overlay.index]
@@ -3864,9 +3900,16 @@ export function Chat({
           // Plugin status contributions (tuiStatus seam): one joined line,
           // truncated by the Text wrap contract — the host owns the layout,
           // plugins own only their text.
-          <Text dimColor wrap="truncate">
-            {statusEntries.map(entry => entry.text).join(' · ')}
-          </Text>
+          //
+          // marginTop matches every sibling chrome block (goal panel, recap
+          // row, balance row). Without it the line butts straight against
+          // whatever rendered last — a plugin path sitting flush under the
+          // goal summary reads as one wrapped paragraph.
+          <Box marginTop={1} flexShrink={0}>
+            <Text dimColor wrap="truncate">
+              {statusEntries.map(entry => entry.text).join(' · ')}
+            </Text>
+          </Box>
         )}
         {activePreview === null && statusViews.map(view => (
           <PluginStatusViewBoundary
@@ -3985,6 +4028,8 @@ export function Chat({
         />
         <StatusLine
           channel={channel}
+          segments={statusSegments}
+          decorations={statusDecorations}
           selectionActive={selectionActive}
           helpOpen={helpOpen}
           wake={
@@ -4067,7 +4112,7 @@ export function Chat({
           )}
           {overlay.kind === 'model' && (
             <Box flexDirection="column" marginTop={1}>
-              {models.length === 0 ? (
+              {!modelCatalogLoaded && models.length === 0 ? (
                 <ModelPickerLoading />
               ) : activeModelGroup === undefined ? (
                 <ModelPicker
@@ -4078,17 +4123,7 @@ export function Chat({
                     // 点击分组行 = 进入该组（与 Enter 同一条路径）
                     const group = modelGroups[index]
                     if (!group) return
-                    setModelGroup(group.provider)
-                    if (group.provider === RECENTS_GROUP_PROVIDER) {
-                      dispatchOverlay({ type: 'set-index', kind: 'model', index: 0 })
-                      return
-                    }
-                    const landing = modelPickerLanding(
-                      models.filter(model => model.provider === group.provider),
-                      channel.provider,
-                      channel.model,
-                    )
-                    dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
+                    openModelGroup(group)
                   }}
                 />
               ) : (

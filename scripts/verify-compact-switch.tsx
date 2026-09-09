@@ -16,6 +16,9 @@
  *
  * 运行：node --import tsx/esm scripts/verify-compact-switch.tsx
  */
+// Assertions below check Chinese notice text.
+import './lib/default-lang-zh.mjs'
+
 // 隔离家目录：switchModel 会把选择写进 ~/.dsh-tui/model.json（modelPrefs
 // 在模块加载时按 homedir() 解析）。必须在 import src 之前；HOME 与
 // USERPROFILE 成对设置，两个平台都隔离。

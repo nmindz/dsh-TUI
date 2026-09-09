@@ -36,7 +36,7 @@ import { clearResumeTarget, resumeTargetFromArgv, writeResumeTarget } from '../s
 import { resolveSessionCwd } from '../utils/workspaceRoot.js'
 import { beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isStandaloneRuntime, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice } from '../update.js'
 import { getLang, isLang, resolveStartupLang, setLang, t, writeLangPref } from '../i18n.js'
-import { DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, applyPageMargin, isPageMarginMode, normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, FOOTER_FIELD_IDS, FOOTER_LAYOUT_SPACER, FOOTER_LAYOUT_WILDCARD, applyPageMargin, isFooterLayoutToken, isPageMarginMode, normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import {
   draftComboConflicts,
   effectiveComboString,
@@ -644,6 +644,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           contextUsage: Schema.boolean().default(DEFAULT_STATUS_BAR.contextUsage),
           cache: Schema.boolean().default(DEFAULT_STATUS_BAR.cache),
           tokens: Schema.boolean().default(DEFAULT_STATUS_BAR.tokens),
+          cost: Schema.boolean().default(DEFAULT_STATUS_BAR.cost),
           tps: Schema.boolean().default(DEFAULT_STATUS_BAR.tps),
           gitBranch: Schema.boolean().default(DEFAULT_STATUS_BAR.gitBranch),
           sessionTitle: Schema.boolean().default(DEFAULT_STATUS_BAR.sessionTitle),
@@ -654,7 +655,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
           trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
           shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
-        }).default({ ...DEFAULT_STATUS_BAR }),
+          pluginSegments: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginSegments),
+          // Explicit footer arrangement. Set, it overrides every field
+          // switch above; `|` splits left from the right-aligned group.
+          layout: Schema.array(Schema.string()).default([]),
+        }).default({ ...DEFAULT_STATUS_BAR, layout: [] }),
         // Header pixel whale art; on unless settings.yaml says otherwise.
         whale: Schema.boolean().default(true),
         // Idle whale behaviors after the intro settles; on by default —
@@ -752,7 +757,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       channel.setPromptSessionLabel(value.promptSessionLabel ?? config.promptSessionLabel ?? false)
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
-      channel.setStatusBar(normalizeStatusBar(value.statusBar ?? config.statusBar))
+      const statusBar = normalizeStatusBar(value.statusBar ?? config.statusBar)
+      // Warn once per apply for layout tokens that survive shape validation
+      // but name no built-in field — a typo, or a plugin that never
+      // registered. The render path must stay silent, so this is the only
+      // place a user learns their layout has a dead entry.
+      for (const token of statusBar.layout ?? []) {
+        if (token === FOOTER_LAYOUT_SPACER || token === FOOTER_LAYOUT_WILDCARD) continue
+        if (!FOOTER_FIELD_IDS.includes(token as never)) {
+          ctx.logger.info(`dsh-tui: statusBar.layout token "${token}" matches no built-in field; expecting a plugin segment with that key`)
+        }
+      }
+      channel.setStatusBar(statusBar)
     }
     // Shortcut overrides resolve per action: settings user layer wins over
     // cordis.yml's `shortcuts` (same precedence as every other field);
@@ -1320,6 +1336,37 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           hintDescriptions: { zh: '仅控制空闲时的 `? for shortcuts` 提示；按 ? 打开快捷键以及 Esc 快捷提示均不受影响。' },
           group: 'status-bar',
           kind: 'boolean',
+        },
+        {
+          path: ['statusBar', 'pluginSegments'],
+          label: 'Show plugin segments',
+          descriptions: { zh: '显示插件状态段' },
+          hint: 'Render footer segments contributed by plugins through tuiStatus.setSegment.',
+          hintDescriptions: { zh: '渲染插件经 tuiStatus.setSegment 贡献的页脚状态段。' },
+          group: 'status-bar',
+          kind: 'boolean',
+        },
+        {
+          // Comma-separated on screen, stored as an array. Naming any field
+          // makes the layout authoritative: the switches above stop gating
+          // and only listed slots render, in listed order.
+          path: ['statusBar', 'layout'],
+          label: 'Footer layout',
+          descriptions: { zh: '页脚布局' },
+          hint: 'Comma-separated field order, e.g. `model, ctx, |, git, cwd`. Fields before `|` go left, after it right-aligned; `*` expands unlisted plugin segments. Naming any field overrides the switches above. Leave blank for the stock layout.',
+          hintDescriptions: { zh: '逗号分隔的字段顺序，例如 `model, ctx, |, git, cwd`。`|` 之前在左组、之后右对齐；`*` 展开未列出的插件段。一旦填写即覆盖上面的字段开关。留空则用默认布局。' },
+          group: 'status-bar',
+          kind: 'text',
+          format: (value: unknown) => Array.isArray(value) ? value.join(', ') : '',
+          parse: (text: string) => {
+            const trimmed = text.trim()
+            if (trimmed === '') return { kind: 'set' as const, value: [] }
+            const tokens = trimmed.split(',').map(token => token.trim()).filter(token => token !== '')
+            // Reject the whole draft on a bad token: silently dropping one
+            // entry from a list the user just typed is worse than refusing.
+            if (!tokens.every(token => isFooterLayoutToken(token))) return undefined
+            return { kind: 'set' as const, value: tokens }
+          },
         },
         {
           path: ['whale'],

@@ -3,7 +3,8 @@ import { Box, Text, useTerminalSize, useTheme } from '../ui.js'
 import type { Color } from '../ink/styles.js'
 import { formatTokens } from '../terminal-utils/format.js'
 import { t } from '../i18n.js'
-import { formatContextUsage, DEFAULT_STATUS_BAR, normalizeStatusBar, type StatusBarConfig } from '../tuiDisplayPrefs.js'
+import { formatContextUsage, DEFAULT_STATUS_BAR, FOOTER_LAYOUT_SPACER, FOOTER_LAYOUT_WILDCARD, normalizeStatusBar, type FooterFieldId, type StatusBarConfig } from '../tuiDisplayPrefs.js'
+import type { TuiFieldDecorationEntry, TuiFooterSegmentEntry } from '../dsh-adapter/status.js'
 import { estimateSessionCostCny, estimateSessionCostSplitCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { ActivityLine, contextPressurePct } from '../components/ActivityLine.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
@@ -12,6 +13,9 @@ import { formatJobDuration, type BackgroundJobState } from '../dsh-adapter/jobs.
 /** Stable fallback for stubbed channels: verify/repro harnesses render the
  *  real Chat with partial channel literals that predate the jobs field. */
 const NO_BACKGROUND_JOBS: readonly BackgroundJobState[] = []
+/** Same stable-empty trick for hosts and harnesses without the seam. */
+const NO_FOOTER_SEGMENTS: readonly TuiFooterSegmentEntry[] = []
+const NO_FIELD_DECORATIONS: readonly TuiFieldDecorationEntry[] = []
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
 import { modeDisplayName } from '../sessionModes.js'
 import { MiniWake } from '../components/trajectory/MiniWake.js'
@@ -61,18 +65,82 @@ type HoverTarget =
   | 'cwd'
   | 'title'
   | `segment:${string}`
+  | `plugin:${string}`
 
 /** One inline footer field: `node` renders inside a shrinkable, optionally
  *  hoverable Box; `key` doubles as the React key in its row. */
 type FieldPart = {
   key: string
   node: React.ReactNode
+  /** The field's current plain value, when it has one. Only used to resolve
+   *  a decoration's `prefixByValue`/`suffixByValue` lookup. */
+  value?: string
   /** Present when the field shows a detail readout on hover. */
   id?: HoverTarget
   /** Present when the field's own text may be truncated: hovering pops a
    *  tooltip with the full string (e.g. the session title, cut mid-word
    *  when the right-aligned group runs out of columns). */
   tooltip?: string
+}
+
+/**
+ * Every ordered footer slot. `jobs` rides along for ordering but is NOT a
+ * {@link FooterFieldId}: the background-job chip is transient session state,
+ * so neither a preference nor a layout may hide it.
+ */
+type FooterSlotId = FooterFieldId | 'jobs'
+
+/** Stock order, read straight off the pre-registry field literals. */
+const STOCK_LEFT: readonly FooterSlotId[] =
+  ['model', 'tps', 'jobs', 'thinking', 'mode', 'cache', 'tokens', 'cost']
+const STOCK_RIGHT: readonly FooterSlotId[] =
+  ['goal', 'git', 'cwd', 'title', 'sessionId']
+
+/** Slot → the preference that gates it. Slots absent here are always on. */
+const BOOL_OF: Readonly<Partial<Record<FooterSlotId, keyof StatusBarConfig>>> = {
+  model: 'model',
+  tps: 'tps',
+  thinking: 'thinking',
+  mode: 'mode',
+  cache: 'cache',
+  tokens: 'tokens',
+  cost: 'cost',
+  ctx: 'contextUsage',
+  goal: 'goal',
+  git: 'gitBranch',
+  cwd: 'cwd',
+  title: 'sessionTitle',
+  sessionId: 'sessionId',
+}
+
+/** A slot renders when its preference is on (or it has none). */
+function slotEnabled(statusBar: StatusBarConfig, id: FooterSlotId): boolean {
+  const key = BOOL_OF[id]
+  return key === undefined || statusBar[key] === true
+}
+
+/**
+ * Wrap a built-in field's node with a plugin decoration's icons. The node
+ * itself is untouched, so the field keeps its hover target, tooltip and
+ * truncation; only text is added on either side. A value-keyed icon wins
+ * over the static one — that is what lets an effort icon track the level.
+ */
+function decorate(part: FieldPart, decoration: TuiFieldDecorationEntry | undefined): FieldPart {
+  if (decoration === undefined) return part
+  const value = part.value
+  const prefix = (value !== undefined ? decoration.prefixByValue?.[value] : undefined) ?? decoration.prefix
+  const suffix = (value !== undefined ? decoration.suffixByValue?.[value] : undefined) ?? decoration.suffix
+  if (prefix === undefined && suffix === undefined) return part
+  return {
+    ...part,
+    node: (
+      <>
+        {prefix === undefined ? null : <Text>{prefix}</Text>}
+        {part.node}
+        {suffix === undefined ? null : <Text>{suffix}</Text>}
+      </>
+    ),
+  }
 }
 
 /**
@@ -120,11 +188,17 @@ function FieldLine({
 
 export function StatusLine({
   channel,
+  segments = NO_FOOTER_SEGMENTS,
+  decorations = NO_FIELD_DECORATIONS,
   selectionActive = false,
   helpOpen = false,
   wake,
 }: {
   channel: Channel
+  /** Admitted plugin footer segments (`ctx.tuiStatus.setSegment`). */
+  segments?: readonly TuiFooterSegmentEntry[]
+  /** Plugin icons for built-in fields (`ctx.tuiStatus.decorateField`). */
+  decorations?: readonly TuiFieldDecorationEntry[]
   selectionActive?: boolean
   helpOpen?: boolean
   /**
@@ -162,20 +236,25 @@ export function StatusLine({
   const contextUsed = usage === undefined
     ? undefined
     : usage.input + usage.cacheRead + usage.cacheWrite
-  const contextParts: FieldPart[] = []
+  // Availability registry: a slot lands here when its DATA exists. Boolean
+  // gating and ordering are applied at selection, so `statusBar.layout` can
+  // address the same slots without duplicating any of these expressions.
+  const available = new Map<FooterSlotId, FieldPart>()
 
-  if (statusBar.thinking && channel.reasoningEffort !== undefined) {
-    contextParts.push({
+  if (channel.reasoningEffort !== undefined) {
+    available.set('thinking', {
       key: 'effort',
+      value: channel.reasoningEffort,
       node: <Text color="inactiveShimmer">{channel.reasoningEffort}</Text>,
     })
   }
   const modeNeedsExplicitMarker = channel.mode.plan === true
     || channel.mode.sandbox === 'danger-full-access'
     || channel.mode.approval === 'never'
-  if (statusBar.mode && (channel.modeIndex > 0 || modeNeedsExplicitMarker)) {
-    contextParts.push({
+  if (channel.modeIndex > 0 || modeNeedsExplicitMarker) {
+    available.set('mode', {
       key: 'mode',
+      value: modeDisplayName(channel.mode),
       node: (
         <Text
           color={channel.mode.plan === true ? 'planMode' : 'warning'}
@@ -186,9 +265,9 @@ export function StatusLine({
     })
   }
 
-  const formattedContext = statusBar.contextUsage
-    ? formatContextUsage(contextUsed, channel.contextWindow, statusBar.compact)
-    : undefined
+  // Computed ungated so `ctx` can be a layout-addressable slot; the
+  // `contextUsage` preference is applied at selection like every other slot.
+  const formattedContext = formatContextUsage(contextUsed, channel.contextWindow, statusBar.compact)
   // The ctx field's two faces: the idle readout, and the hover state — an
   // in-place pressure bar (the user-liked "text becomes a bar" morph).
   //
@@ -229,23 +308,24 @@ export function StatusLine({
           <Text dimColor>ctx </Text>{formattedContext}
         </Text>
       )
-  if (statusBar.cache) {
-    const cacheRate = formatCacheHitRate(usage)
-    if (cacheRate !== undefined) {
-      contextParts.push({
-        key: 'cache',
-        id: 'cache',
-        node: (
-          <Text color="inactiveShimmer">
-            <Text dimColor>{t('status-cache-label')}</Text>{cacheRate}
-          </Text>
-        ),
-      })
-    }
+  if (ctxNode !== undefined) {
+    available.set('ctx', { key: 'context', id: 'ctx', node: ctxNode })
+  }
+  const cacheRate = formatCacheHitRate(usage)
+  if (cacheRate !== undefined) {
+    available.set('cache', {
+      key: 'cache',
+      id: 'cache',
+      node: (
+        <Text color="inactiveShimmer">
+          <Text dimColor>{t('status-cache-label')}</Text>{cacheRate}
+        </Text>
+      ),
+    })
   }
 
   let tpsPart: FieldPart | undefined
-  if (statusBar.tps && channel.tps !== undefined) {
+  if (channel.tps !== undefined) {
     if (channel.working && channel.tpsSamples.length === 0) {
       tpsPart = {
         key: 'tps',
@@ -289,108 +369,184 @@ export function StatusLine({
   const liveJobs = (channel.backgroundJobs ?? NO_BACKGROUND_JOBS).filter(
     job => job.status === 'running' || job.status === 'stopping',
   )
-  const jobsPart: FieldPart | undefined = liveJobs.length === 0
-    ? undefined
-    : {
-        key: 'jobs',
-        id: 'jobs',
+  if (liveJobs.length > 0) {
+    available.set('jobs', {
+      key: 'jobs',
+      id: 'jobs',
+      node: (
+        <Text color="toolDotTask">
+          {'● '}{liveJobs.length}
+        </Text>
+      ),
+    })
+  }
+  if (tpsPart !== undefined) available.set('tps', tpsPart)
+
+  available.set('model', {
+    key: 'model',
+    id: 'model',
+    value: channel.model,
+    node: <Text color="inactiveShimmer">{channel.model}</Text>,
+  })
+  available.set('tokens', {
+    key: 'tokens',
+    id: 'tokens',
+    node: (
+      <Text color="inactiveShimmer">
+        {formatTokens(channel.tokens.input)}→{formatTokens(channel.tokens.output)}
+      </Text>
+    ),
+  })
+  // Estimated session spend (≈¥): only for official DeepSeek providers
+  // whose model has a known price, and only once the estimate is non-zero
+  // (a fresh session showing ¥0.00 is noise). The trailing 峰/谷 marker
+  // shows the current billing window. Hover shows the breakdown.
+  if (isDeepSeekOfficialProvider(channel.provider)) {
+    const estimate = estimateSessionCostCny(channel.tokens, channel.model)
+    if (estimate !== undefined && estimate > 0) {
+      available.set('cost', {
+        key: 'cost',
+        id: 'cost',
         node: (
-          <Text color="toolDotTask">
-            {'● '}{liveJobs.length}
+          <Text color="inactiveShimmer">
+            {t('status-cost-label')}¥{estimate.toFixed(2)} {t(isPeakHour() ? 'cost-now-peak' : 'cost-now-idle')}
           </Text>
         ),
+      })
+    }
+  }
+
+  // Goal chip first: session-level state outranks repo/location details.
+  if (channel.goal !== undefined) {
+    available.set('goal', {
+      key: 'goal',
+      id: 'goal',
+      node: <GoalStatusChip goal={channel.goal} minimal={channel.minimal} />,
+    })
+  }
+  if (channel.gitBranch) {
+    available.set('git', {
+      key: 'git',
+      id: 'git',
+      value: channel.gitBranch,
+      node: <Text color="professionalBlue">{channel.gitBranch}</Text>,
+    })
+  }
+  available.set('cwd', {
+    key: 'cwd',
+    id: 'cwd',
+    node: (
+      <Text color="inactiveShimmer">
+        {statusBar.compact ? basename(displayCwd) : displayCwd}
+      </Text>
+    ),
+  })
+  if (channel.sessionTitle) {
+    available.set('title', {
+      key: 'title',
+      id: 'title',
+      // The title truncates mid-word when the right-aligned group
+      // overflows; the tooltip carries the full string.
+      tooltip: channel.sessionTitle,
+      node: <Text dimColor>{channel.sessionTitle}</Text>,
+    })
+  }
+  // Short id last: a provenance tag trails the content it identifies, and
+  // the 8-char form is what the session log filename starts with, so a
+  // truncated rendering still names the right log for --resume.
+  if (channel.agentId) {
+    available.set('sessionId', {
+      key: 'sessionId',
+      id: 'sessionId',
+      node: <Text dimColor>{`#${channel.agentId.slice(0, 8)}`}</Text>,
+    })
+  }
+
+  // Stock selection: preference-gated, stock order. `ctx` stays out of the
+  // left group here — the render below still owns its compact/full placement.
+  // Plugin icons for built-in fields. Minimal mode drops them with every
+  // other plugin contribution.
+  const decorationOf = new Map(
+    (channel.minimal ? NO_FIELD_DECORATIONS : decorations).map(entry => [entry.field, entry]),
+  )
+  const slotPart = (id: FooterSlotId): FieldPart =>
+    decorate(available.get(id)!, decorationOf.get(id))
+  const pickSlots = (ids: readonly FooterSlotId[]): FieldPart[] =>
+    ids
+      .filter(id => slotEnabled(statusBar, id) && available.has(id))
+      .map(slotPart)
+
+  // Plugin footer segments: text-only, host-built cells. Minimal mode and
+  // the `pluginSegments` switch drop them wholesale, and the store has
+  // already sorted them by declared order then registration order.
+  const pluginSegments = channel.minimal || !statusBar.pluginSegments ? NO_FOOTER_SEGMENTS : segments
+  const segmentPart = (entry: TuiFooterSegmentEntry): FieldPart => ({
+    key: `plugin:${entry.key}`,
+    id: `plugin:${entry.key}`,
+    ...(entry.tooltip === undefined ? {} : { tooltip: entry.tooltip }),
+    node: (
+      <Text
+        {...(entry.color === undefined ? {} : { color: entry.color })}
+        {...(entry.dim ? { dimColor: true } : {})}
+      >
+        {entry.text}
+      </Text>
+    ),
+  })
+
+  // An explicit layout owns the footer: membership decides what renders
+  // (the per-field switches no longer gate), and array position decides
+  // where. Minimal mode never reaches here — it rebuilds `statusBar` from
+  // the defaults, which carry no layout.
+  const layoutTokens = statusBar.layout
+  const usingLayout = layoutTokens !== undefined
+  const segmentByKey = new Map(pluginSegments.map(entry => [entry.key, entry]))
+  const namedInLayout = new Set(layoutTokens ?? [])
+  const resolveTokens = (tokens: readonly string[]): FieldPart[] =>
+    tokens.flatMap(token => {
+      // `*` is the escape hatch for plugins that register after the layout
+      // was written: it expands to every segment not named explicitly.
+      if (token === FOOTER_LAYOUT_WILDCARD) {
+        return pluginSegments
+          .filter(entry => !namedInLayout.has(entry.key))
+          .map(segmentPart)
       }
+      const builtIn = available.get(token as FooterSlotId)
+      if (builtIn !== undefined) return [slotPart(token as FooterSlotId)]
+      const segment = segmentByKey.get(token)
+      // Unknown tokens (a typo, or a plugin that never registered) resolve
+      // to nothing; the config layer owns warning about them.
+      return segment === undefined ? [] : [segmentPart(segment)]
+    })
 
-  const leftFields: FieldPart[] = [
-    ...(statusBar.model
-      ? [{ key: 'model', id: 'model' as const, node: <Text color="inactiveShimmer">{channel.model}</Text> }]
-      : []),
-    ...(tpsPart !== undefined ? [tpsPart] : []),
-    ...(jobsPart !== undefined ? [jobsPart] : []),
-    ...contextParts,
-    ...(statusBar.tokens
-      ? [{
-          key: 'tokens',
-          id: 'tokens' as const,
-          node: (
-            <Text color="inactiveShimmer">
-              {formatTokens(channel.tokens.input)}→{formatTokens(channel.tokens.output)}
-            </Text>
-          ),
-        }]
-      : []),
-    // Estimated session spend (≈¥): only for official DeepSeek providers
-    // whose model has a known price, and only once the estimate is non-zero
-    // (a fresh session showing ¥0.00 is noise). The trailing 峰/谷 marker
-    // shows the current billing window. Hover shows the breakdown.
-    ...(statusBar.cost && isDeepSeekOfficialProvider(channel.provider)
-      ? (() => {
-        const estimate = estimateSessionCostCny(channel.tokens, channel.model)
-        return estimate === undefined || estimate <= 0
-          ? []
-          : [{
-              key: 'cost',
-              id: 'cost' as const,
-              node: (
-                <Text color="inactiveShimmer">
-                  {t('status-cost-label')}¥{estimate.toFixed(2)} {t(isPeakHour() ? 'cost-now-peak' : 'cost-now-idle')}
-                </Text>
-              ),
-            }]
-      })()
-      : []),
-  ]
-
-  const rightFields: FieldPart[] = [
-    // Goal chip first: session-level state outranks repo/location details.
-    ...(statusBar.goal && channel.goal !== undefined
-      ? [{
-          key: 'goal',
-          id: 'goal' as const,
-          node: <GoalStatusChip goal={channel.goal} minimal={channel.minimal} />,
-        }]
-      : []),
-    ...(statusBar.gitBranch && channel.gitBranch
-      ? [
-          {
-            key: 'git',
-            id: 'git' as const,
-            node: <Text color="professionalBlue">{channel.gitBranch}</Text>,
-          },
-        ]
-      : []),
-    ...(statusBar.cwd
-      ? [{
-          key: 'cwd',
-          id: 'cwd' as const,
-          node: (
-            <Text color="inactiveShimmer">
-              {statusBar.compact ? basename(displayCwd) : displayCwd}
-            </Text>
-          ),
-        }]
-      : []),
-    ...(statusBar.sessionTitle && channel.sessionTitle
-      ? [{
-          key: 'title',
-          id: 'title' as const,
-          // The title truncates mid-word when the right-aligned group
-          // overflows; the tooltip carries the full string.
-          tooltip: channel.sessionTitle,
-          node: <Text dimColor>{channel.sessionTitle}</Text>,
-        }]
-      : []),
-    // Short id last: a provenance tag trails the content it identifies, and
-    // the 8-char form is what the session log filename starts with, so a
-    // truncated rendering still names the right log for --resume.
-    ...(statusBar.sessionId && channel.agentId
-      ? [{
-          key: 'sessionId',
-          id: 'sessionId' as const,
-          node: <Text dimColor>{`#${channel.agentId.slice(0, 8)}`}</Text>,
-        }]
-      : []),
-  ]
+  let leftFields: FieldPart[]
+  let rightFields: FieldPart[]
+  let ctxRender: React.ReactNode | undefined
+  if (layoutTokens !== undefined) {
+    const cut = layoutTokens.indexOf(FOOTER_LAYOUT_SPACER)
+    const leftTokens = cut < 0 ? layoutTokens : layoutTokens.slice(0, cut)
+    const rightTokens = cut < 0 ? [] : layoutTokens.slice(cut + 1)
+    // The jobs chip is never addressable, so a layout cannot drop it; it
+    // leads the left group rather than sitting at its stock position.
+    const jobs = available.get('jobs')
+    leftFields = [...(jobs === undefined ? [] : [slotPart('jobs')]), ...resolveTokens(leftTokens)]
+    rightFields = resolveTokens(rightTokens)
+    // `ctx` resolves inline at its token position under a layout, so the
+    // compact renderer's pinned-right box is not used.
+    ctxRender = undefined
+  } else {
+    // Additive: plugin segments trail the built-in fields of their declared
+    // group, so adding one never disturbs the stock order.
+    leftFields = [
+      ...pickSlots(STOCK_LEFT),
+      ...pluginSegments.filter(entry => entry.placement === 'footer-left').map(segmentPart),
+    ]
+    rightFields = [
+      ...pickSlots(STOCK_RIGHT),
+      ...pluginSegments.filter(entry => entry.placement === 'footer-right').map(segmentPart),
+    ]
+    ctxRender = statusBar.contextUsage && available.has('ctx') ? slotPart('ctx').node : undefined
+  }
 
   const hint = selectionActive
     ? t('statusline-hint-select')
@@ -422,7 +578,7 @@ export function StatusLine({
 
   // The supplemental-row readout for the hovered field: replaces the idle
   // hint (never the activity line) while the pointer dwells on a field.
-  const detail = buildHoverDetail(hover, channel, usage, contextUsed)
+  const detail = buildHoverDetail(hover, channel, usage, contextUsed, pluginSegments)
   const trailer: React.ReactNode = detail !== null
     ? detail
     : hint !== ''
@@ -432,9 +588,15 @@ export function StatusLine({
   const compactFields = [...leftFields, ...rightFields]
   const fullLeftFields = [
     ...leftFields,
-    ...(ctxNode !== undefined ? [{ key: 'context', id: 'ctx' as const, node: ctxNode }] : []),
+    ...(ctxRender !== undefined ? [{ key: 'context', id: 'ctx' as const, node: ctxRender }] : []),
   ]
-  const hasStatusFields = compactFields.length > 0 || ctxNode !== undefined
+  // A layout always renders through the two-group row: `|` has to mean
+  // something, and the compact row folds the right group into the left.
+  // `compact` then only abbreviates (cwd basename, percent-first ctx).
+  const useCompactRow = statusBar.compact && !usingLayout
+  const hasStatusFields = usingLayout
+    ? leftFields.length > 0 || rightFields.length > 0
+    : compactFields.length > 0 || ctxRender !== undefined
   // The supplemental row is PERMANENTLY mounted (height pinned to 1)
   // whenever the footer carries hoverable chrome — mounting it from nothing
   // on hover is what made the footer grow mid-gesture and shoved the
@@ -480,14 +642,14 @@ export function StatusLine({
           />
         ) : null}
         {/* Row 2: optional status fields — every field is independently gated. */}
-        {hasStatusFields ? statusBar.compact ? (
+        {hasStatusFields ? useCompactRow ? (
           <Box flexDirection="row" justifyContent="space-between" gap={2}>
             <Box flexGrow={1} flexShrink={1} flexDirection="row" overflow="hidden">
               <FieldLine parts={compactFields} hoverProps={hoverProps} />
             </Box>
-            {ctxNode !== undefined ? (
+            {ctxRender !== undefined ? (
               <Box flexShrink={0} {...hoverProps('ctx')}>
-                <Text wrap="truncate">{ctxNode}</Text>
+                <Text wrap="truncate">{ctxRender}</Text>
               </Box>
             ) : null}
           </Box>
@@ -561,10 +723,19 @@ function buildHoverDetail(
   channel: Channel,
   usage: UsageSnapshot | undefined,
   contextUsed: number | undefined,
+  segments: readonly TuiFooterSegmentEntry[] = NO_FOOTER_SEGMENTS,
 ): React.ReactNode | null {
   if (hover === null) return null
   const window = channel.contextWindow
   const dim = (label: string): React.ReactNode => <Text dimColor>{label}</Text>
+
+  // Plugin segments answer a hover only when they supplied a detail; the
+  // prefix cannot collide with the context-bar's `segment:` targets.
+  if (hover.startsWith('plugin:')) {
+    const entry = segments.find(candidate => candidate.key === hover.slice('plugin:'.length))
+    if (entry?.detail === undefined) return null
+    return <Text wrap="truncate">{entry.detail}</Text>
+  }
 
   if (hover.startsWith('segment:')) {
     if (window === undefined || window <= 0 || contextUsed === undefined) return null

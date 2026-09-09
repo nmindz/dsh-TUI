@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate } from '@deepseek-ai/cordis-plugin-loader'
 import { parse as parseYaml } from 'yaml'
 import { prepareUpstreamSourceResolver } from './upstream-source-baseline.mjs'
+import { UPSTREAM_VALIDATED_VERSION } from '../src/dsh-adapter/contract.js'
 
 const root = resolve(import.meta.dirname, '..')
 const tuiPatchPath = join(root, 'cordis.patch.yml')
@@ -157,8 +158,13 @@ const requireSourceBaseline = process.env.DSH_REQUIRE_ALPHA_BASELINE === '1'
 if (existsSync(sourceManifest) && existsSync(sourcePatch)) {
   const resolver = prepareUpstreamSourceResolver(sourceRoot)
   const source = baseline('source', sourceManifest, sourcePatch, resolver.baseUrl)
-  if (requireSourceBaseline && source.version !== '0.1.2-rc.1') {
-    throw new Error(`required source baseline is 0.1.2-rc.1, got ${source.version}`)
+  // Derived from the contract, never a second literal: the required baseline
+  // IS the primary validated line, and a hardcoded copy silently disagrees
+  // with `contract.ts` the moment that line moves.
+  if (requireSourceBaseline && source.version !== UPSTREAM_VALIDATED_VERSION) {
+    throw new Error(
+      `required source baseline is ${UPSTREAM_VALIDATED_VERSION} (UPSTREAM_VALIDATED_VERSION), got ${source.version}`,
+    )
   }
   baselines.push(source)
 } else if (requireSourceBaseline) {

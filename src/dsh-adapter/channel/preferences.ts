@@ -1,5 +1,5 @@
 import { setMinimalMode } from '../../minimalMode.js'
-import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, type StatusBarConfig } from '../../tuiDisplayPrefs.js'
+import { normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, sameFooterLayout, normalizeToolBackground, type StatusBarConfig } from '../../tuiDisplayPrefs.js'
 import type { ChannelState } from '../channel/types.js'
 
 export function createPreferences(getState: () => Pick<ChannelState, 'diffLayout' | 'thinkingFold' | 'toolBackground' | 'scrollGutter' | 'pageMargin' | 'foldTerminalCommand' | 'promptSessionLabel' | 'expandEditor' | 'smoothStreaming' | 'statusBar' | 'whale' | 'whaleIdle' | 'minimal' | 'emit'>): Pick<ChannelState, 'setDiffLayout' | 'setThinkingFold' | 'setToolBackground' | 'setScrollGutter' | 'setPageMargin' | 'setFoldTerminalCommand' | 'setPromptSessionLabel' | 'setExpandEditor' | 'setSmoothStreaming' | 'setStatusBar' | 'setWhale' | 'setWhaleIdle' | 'setMinimal'> {
@@ -74,9 +74,12 @@ export function createPreferences(getState: () => Pick<ChannelState, 'diffLayout
     setStatusBar(config) {
       const state = getState()
       const next = normalizeStatusBar({ ...state.statusBar, ...config })
+      // Every field but `layout` is a boolean; `layout` normalizes to a
+      // fresh array each call and needs a content comparison.
       const changed = Object.keys(next).some(key =>
-        next[key as keyof StatusBarConfig] !== state.statusBar[key as keyof StatusBarConfig],
-      )
+        key !== 'layout'
+        && next[key as keyof StatusBarConfig] !== state.statusBar[key as keyof StatusBarConfig],
+      ) || !sameFooterLayout(next.layout, state.statusBar.layout)
       if (!changed) return
       state.statusBar = next
       state.emit()

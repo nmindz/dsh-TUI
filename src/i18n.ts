@@ -255,6 +255,7 @@ const dict = {
   'model-switch-attach-failed': { zh: '模型已切换，但工作区挂载失败 · {{err}}', en: 'Model switched, but workspace attachment failed · {{err}}' },
   'model-usage': { zh: '用法：/model <provider/model>（如 deepseek/deepseek-v4-flash）', en: 'Usage: /model <provider/model> (e.g. deepseek/deepseek-v4-flash)' },
   'model-unknown': { zh: '未知模型「{{spec}}」· /model 查看全部', en: 'Unknown model "{{spec}}" · /model to view all' },
+  'model-group-unavailable': { zh: '「{{name}}」未列出任何模型：该路由未登录，或其模型目录为空 · /provider 查看配置', en: '"{{name}}" lists no models: the route is signed out or its catalog is empty · /provider to inspect it' },
   'compact-unavailable': { zh: '压缩不可用——当前 leaf 没有压缩服务', en: 'Compaction unavailable · no compaction service in this leaf' },
   'compact-while-working': { zh: '回合运行中，无法压缩会话', en: 'Cannot compact while a turn is running' },
   'compact-working': { zh: '正在压缩会话…', en: 'Summarizing earlier turns…' },
@@ -700,6 +701,8 @@ const dict = {
   'load-earlier': { zh: ' ↑ 加载更早消息（会话日志完整，/export 导出全文） ', en: ' ↑ load earlier messages (full session log; /export for full text) ' },
   'show-previous-messages': { zh: ' ctrl+e 显示前 {{n}} 条消息 ', en: ' ctrl+e to show {{n}} previous messages ' },
   'resume-none-in-cwd': { zh: '当前目录没有可恢复的历史会话', en: 'No resumable sessions in the current directory' },
+  'resume-only-live-here': { zh: '当前目录的会话就是你正在进行的这个——退出后即可恢复', en: "The only conversation here is the one you are in — it is resumable once you leave it" },
+  'resume-only-live-here-n': { zh: '当前目录的 {{n}} 个会话都属于你正在进行的这条线——退出后即可恢复', en: 'All {{n}} conversations here belong to the one you are in — resumable once you leave it' },
 
   // ── screens/SessionBrowser.tsx + screens/Chat.tsx (/resume) ─────────
   'resume-resumed': { zh: '已恢复会话', en: 'Session resumed' },
@@ -868,6 +871,7 @@ const dict = {
   'picker-title-model': { zh: '模型', en: 'Model' },
   'picker-group-recent': { zh: '最近使用', en: 'Recently used' },
   'picker-group-count': { zh: '{{count}} 个模型', en: '{{count}} models' },
+  'picker-group-unavailable': { zh: '无可用模型（未登录或目录为空）', en: 'no models (signed out or empty catalog)' },
   'hint-model-groups': { zh: '**Enter** 查看模型 · Esc 退出', en: '**Enter** to view models · Esc to exit' },
   'hint-model-back': { zh: '**Enter** 切换模型 · Esc/⌫ 返回上级', en: '**Enter** to switch · Esc/⌫ to go back' },
   'picker-title-skills': { zh: '技能', en: 'Skills' },

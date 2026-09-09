@@ -346,9 +346,25 @@
     # the ctx.dshAuth service this row provides. Entry-level inject only —
     # the plugin module's own inject is empty so a stale patch cannot
     # deadlock a composition lacking these services (#183 pattern).
+    #
+    # `providers` is the route set this row CLAIMS in the llm registry, and
+    # the registry is first-come: a route claimed here is one llm-pi-ai
+    # cannot serve from its settings section. Both families register
+    # asynchronously, so which one wins is not something a deployment should
+    # have to race for — a deployment that configures `anthropic` (or codex,
+    # or xai) under `llm-pi-ai:` in settings.yaml drops it from this list:
+    #
+    #   DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai   # keep anthropic for llm-pi-ai
+    #
+    # dsh-auth refuses an empty list, so disable the whole row instead when no
+    # subscription sign-in is wanted at all.
     - id: dsh-tui-auth
       name: '@deepseek-harness-tui/dsh-tui/oauth'
       inject: [llm, commands]
+      config:
+        providers: !!js >-
+          (process.env.DSH_TUI_OAUTH_PROVIDERS ?? 'openai-codex,anthropic,xai')
+            .split(',').map(entry => entry.trim()).filter(Boolean)
 
     # The interactive front door. The plugin creates/resumes its agent at
     # runtime, seeds the startup status line, and disposes the whole app tree

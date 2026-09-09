@@ -1,6 +1,49 @@
-import type { ToolBackground, ScrollGutterMode, PageMarginSetting, PageMarginMode, PageMarginSpec, StatusBarConfig } from './adapter/ports/channel-display.js'
+import type { ToolBackground, ScrollGutterMode, PageMarginSetting, PageMarginMode, PageMarginSpec, StatusBarConfig, FooterLayout } from './adapter/ports/channel-display.js'
 export type { ToolBackground, ScrollGutterMode, PageMarginSetting, PageMarginMode, PageMarginSpec, StatusBarConfig } from './adapter/ports/channel-display.js'
 
+
+/**
+ * Addressable built-in footer field slots, in stock render order. These are
+ * the names a user may write in `statusBar.layout`; they intentionally do
+ * NOT map 1:1 onto the boolean keys (`ctx` gates on `contextUsage`, `git`
+ * on `gitBranch`, `title` on `sessionTitle`).
+ *
+ * `jobs` is absent on purpose: the background-job chip is transient session
+ * state rather than chrome, so a layout must not be able to suppress it.
+ */
+export const FOOTER_FIELD_IDS = [
+  'model',
+  'tps',
+  'thinking',
+  'mode',
+  'cache',
+  'tokens',
+  'cost',
+  'ctx',
+  'goal',
+  'git',
+  'cwd',
+  'title',
+  'sessionId',
+] as const
+
+export type FooterFieldId = typeof FOOTER_FIELD_IDS[number]
+
+/** Splits a layout into the left group and the right-aligned group. */
+export const FOOTER_LAYOUT_SPACER = '|'
+
+/** Expands to every registered plugin segment not named elsewhere. */
+export const FOOTER_LAYOUT_WILDCARD = '*'
+
+/** Upper bound on layout tokens — the footer is one row, not a list view. */
+export const FOOTER_LAYOUT_MAX = 24
+
+/**
+ * A flat token list: built-in field ids, plugin segment keys, at most one
+ * spacer and at most one wildcard. Typed as plain strings because plugin
+ * segment keys are only knowable at runtime.
+ */
+export type { FooterLayout } from './adapter/ports/channel-display.js'
 
 /** Defaults keep the essential route/context information visible. */
 export const DEFAULT_STATUS_BAR: Readonly<StatusBarConfig> = Object.freeze({
@@ -22,11 +65,40 @@ export const DEFAULT_STATUS_BAR: Readonly<StatusBarConfig> = Object.freeze({
   activity: false,
   trajectory: false,
   shortcutHint: false,
+  pluginSegments: true,
 })
 
 const TOOL_BACKGROUNDS = new Set<ToolBackground>(['none', 'subtle', 'strong'])
 const SCROLL_GUTTERS = new Set<ScrollGutterMode>(['timeline', 'scrollbar', 'hidden'])
-const STATUS_BAR_KEYS = Object.keys(DEFAULT_STATUS_BAR) as (keyof StatusBarConfig)[]
+/** Every field switch; `layout` is the one non-boolean member. */
+type StatusBarBooleanKey = Exclude<keyof StatusBarConfig, 'layout'>
+const STATUS_BAR_KEYS = Object.keys(DEFAULT_STATUS_BAR) as StatusBarBooleanKey[]
+// Field ids are matched case-insensitively and canonicalized back to their
+// declared spelling: `sessionId` must survive a layout written as
+// `sessionid`, which the lowercase-normalizing token pass would otherwise
+// turn into an unresolvable token.
+const FOOTER_FIELD_BY_LOWER: ReadonlyMap<string, string> = new Map(
+  FOOTER_FIELD_IDS.map(id => [id.toLowerCase(), id as string]),
+)
+
+/** Mirrors the plugin status key rule (`plugin` / `plugin:sub-item`). */
+const FOOTER_SEGMENT_KEY_PATTERN = /^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)*$/u
+
+/** True for a token a layout may legally carry (field id, spacer, wildcard,
+ *  or a plugin segment key). Shape only — plugin keys register at runtime,
+ *  so existence is never asserted here. */
+export function isFooterLayoutToken(token: string): boolean {
+  return FOOTER_FIELD_BY_LOWER.has(token.toLowerCase())
+    || token === FOOTER_LAYOUT_SPACER
+    || token === FOOTER_LAYOUT_WILDCARD
+    || FOOTER_SEGMENT_KEY_PATTERN.test(token)
+}
+
+/** Canonical spelling for a field id written in any case; other tokens
+ *  (plugin keys, spacer, wildcard) pass through unchanged. */
+export function canonicalFooterToken(token: string): string {
+  return FOOTER_FIELD_BY_LOWER.get(token.toLowerCase()) ?? token
+}
 
 /** Normalize untrusted/config-layer values without mutating the input. */
 export function normalizeToolBackground(value: unknown): ToolBackground {
@@ -42,6 +114,50 @@ export function normalizeScrollGutter(value: unknown): ScrollGutterMode {
     : 'timeline'
 }
 
+/**
+ * Normalize a footer layout: lowercase, de-duplicate (first mention wins),
+ * keep at most one spacer and one wildcard, cap the length. Shape only —
+ * unknown tokens survive here because a plugin segment key cannot be
+ * validated before the plugin registers. Anything unusable collapses to
+ * `undefined`, which is exactly the stock-behaviour signal.
+ */
+export function normalizeFooterLayout(value: unknown): FooterLayout | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out: string[] = []
+  let spacer = false
+  let wildcard = false
+  for (const raw of value) {
+    if (typeof raw !== 'string') continue
+    const token = canonicalFooterToken(raw.trim().toLowerCase())
+    if (token === '' || out.includes(token)) continue
+    if (token === FOOTER_LAYOUT_SPACER) {
+      if (spacer) continue
+      spacer = true
+    } else if (token === FOOTER_LAYOUT_WILDCARD) {
+      if (wildcard) continue
+      wildcard = true
+    } else if (!isFooterLayoutToken(token)) {
+      // Malformed token (uppercase-only junk, punctuation, a path). Dropped
+      // here; the settings/config layer owns warning about it.
+      continue
+    }
+    out.push(token)
+    if (out.length >= FOOTER_LAYOUT_MAX) break
+  }
+  // A layout that is nothing but a spacer selects no fields at all — treat
+  // it as unset rather than blanking the footer.
+  if (out.length === 0 || (out.length === 1 && out[0] === FOOTER_LAYOUT_SPACER)) return undefined
+  return Object.freeze(out)
+}
+
+/** Content equality for two layouts — `normalizeFooterLayout` returns a
+ *  fresh array every call, so reference comparison always reports drift. */
+export function sameFooterLayout(a: FooterLayout | undefined, b: FooterLayout | undefined): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined || a.length !== b.length) return false
+  return a.every((token, index) => token === b[index])
+}
+
 /** Merge a partial settings value over the stable status-bar defaults. */
 export function normalizeStatusBar(value: unknown): StatusBarConfig {
   const normalized: StatusBarConfig = { ...DEFAULT_STATUS_BAR }
@@ -51,6 +167,8 @@ export function normalizeStatusBar(value: unknown): StatusBarConfig {
   for (const key of STATUS_BAR_KEYS) {
     if (typeof input[key] === 'boolean') normalized[key] = input[key]
   }
+  const layout = normalizeFooterLayout(input.layout)
+  if (layout !== undefined) normalized.layout = layout
   return normalized
 }
 

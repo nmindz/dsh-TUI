@@ -73,7 +73,8 @@ by `callId`, never guessed from array position.
 - **Replay coalescing**: consecutive token chunks are merged during history
   replay, avoiding repeated string growth for long streamed messages.
 - **Bounded caches**: transcript, render-node, and measurement caches are bounded;
-  removing a bound requires measured evidence.
+  removing a bound requires measured evidence. See
+  [Render cache budgets](rendering-performance.en.md) for how the budgets were sized.
 - **Display-cell width**: ANSI escapes, combining marks, emoji, and East Asian
   wide characters use terminal cell width, not JavaScript `string.length`.
 

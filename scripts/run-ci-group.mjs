@@ -149,6 +149,15 @@ const GROUPS = {
 // 恢复历史会话落点回归：/resume 后最新消息末行必须可见且可达
 // （scrollToBottom 补画完成后的锚定终态），不再落屏外。
     ["repro-resume-position", ['node', '--import', 'tsx/esm', 'scripts/repro-resume-position.tsx']],
+// 文本测量缓存保留回归：布局每帧循环重测挂载文本节点，缓存溢出若整表
+// 清空则命中率塌到 0（长会话每帧全量重测宽度）。断言超预算工作集仍进
+// 稳定态、溢出按最旧淘汰、缓存值等于直接测量。
+    ["verify-text-measure-cache", ['node', '--import', 'tsx/esm', 'scripts/verify-text-measure-cache.ts']],
+// Yoga 逐节点布局缓存回归：槽位预算须覆盖单帧探测的入参组（预算不足时轮转
+// 淘汰把命中率压到 0，每帧全量重测），且多槽命中只服务 measure 遍——layout
+// 遍命中会跳过子节点递归，把子树留在探测用的临时几何上。四组负反控：撤失效、
+// 预算回 4（单元与整树各一）、放回 layout 遍命中。
+    ["verify-yoga-layout-cache", ['node', '--import', 'tsx/esm', 'scripts/verify-yoga-layout-cache.ts']],
   ],
   'input-terminal': [
 // 按键解析回归（issue #110）：Option+Enter（ESC CR）精确/合并/分块
@@ -253,6 +262,18 @@ const GROUPS = {
 //    与粘性报错、真 Chat 驱动的对话框/状态行/快捷键端到端。
     ["verify-extension-events", ['node', '--import', 'tsx/esm', 'scripts/verify-extension-events.tsx']],
     ["verify-extension-ui", ['node', '--import', 'tsx/esm', 'scripts/verify-extension-ui.tsx']],
+// 页脚段台账回归：内容不变的重复 setSegment 不写记录（插件按定时器刷新，
+// 曾把 ledger 写到 27MB），文本/颜色变化各写一条 replace，dispose 写一条
+// release；已准入插件不传 identity 也归属到 componentId 而非 undeclared。
+    ["verify-status-segment-ledger", ['node', '--import', 'tsx/esm', 'scripts/verify-status-segment-ledger.ts']],
+// 显示偏好回归：statusBar 字段开关、compact/full 两种页脚布局、cwd 波浪号
+// 折叠、goal chip、working/selection 提示、上下文条与 wake。底部状态栏的
+// 主回归套件——改 StatusLine 字段或顺序必须先过这一关。
+    ["verify-display-settings", ['node', '--import', 'tsx/esm', 'scripts/verify-display-settings.tsx']],
+// 页脚布局与插件段回归：layout 归一化（大小写规范化、去重、单一分隔符/
+// 通配符、上限）、L1 追加不扰动存量顺序、L2 成员资格压过字段开关、`|`
+// 分组在 compact 下仍生效、minimal 丢弃插件段并忽略 layout、jobs 不可寻址。
+    ["verify-status-footer", ['node', '--import', 'tsx/esm', 'scripts/verify-status-footer.tsx']],
 // 非 TTY 宿主门禁回归（Web/Tauri 共存）：profile 装有 dsh-tui 的非终端
 // 宿主（stdout 为 pipe/null）必须静默跳过插件、不 throw、不影响宿主启动；
 // 显式 dsh-tui launcher/standalone 启动无 TTY 仍保留原报错。
@@ -468,11 +489,22 @@ const GROUPS = {
 // 匹配、北京时间高峰/空闲时段边界、缓存命中计价、未知模型与零 token
 // 不估算、官方 provider 判定。注入 fake fetch，不发真实请求。
     ["verify-balance", ['node', '--import', 'tsx/esm', 'scripts/verify-balance.tsx']],
-// /model 二级选择器派生回归：provider 分组（首现排序、显示名回退、
-// 计数）与落焦规则（多 provider 聚焦当前组、单 provider 直达模型层、
-// 缺席当前 provider 落首行）。键盘与 overlay 归约由 verify-chat-overlay
-// 覆盖，这里钉住两层共用的纯派生。
+// /model 二级选择器派生回归：provider 分组（注册表排序、显示名回退、
+// 计数、零模型路由保留行）与落焦规则（多 provider 聚焦当前组、单
+// provider 直达模型层、缺席当前 provider 落首行）。键盘与 overlay 归约
+// 由 verify-chat-overlay 覆盖，这里钉住两层共用的纯派生。
     ["verify-model-picker-groups", ['node', 'scripts/verify-model-picker-groups.mjs']],
+// /model 顶层 provider 行的来源回归：注册表会列出所有已挂载的目录族
+// （openai/xai/deepseek 出厂即挂载），但只有 llm-pi-ai.providers 里声明过
+// 的路由才配有行——否则会把用户从未配置的 provider 摆进选择器（进去只能
+// 说“不可用”）。同时钉住：已配置但零模型的路由保留行；无 settings 服务
+// 时回落整份注册表而非空列表。
+    ["verify-provider-listing", ['node', 'scripts/verify-provider-listing.mjs']],
+// 回合失败通知的重放边界：turn/end error 的转录 notice 属于历史，重放必须
+// 照画；toast 是「刚刚发生」的播报，重放时再弹等于把该会话历史上每次失败
+// 都重新报一遍（resume 一个曾撞上 provider 529 的会话会凭空弹
+// "Turn error · Overloaded"）。同时钉住 live 事件仍然弹。
+    ["verify-turn-error-replay", ['node', 'scripts/verify-turn-error-replay.mjs']],
 // 全屏出厂默认迁移回归（0.9.x schema + cordis.patch.yml false→true 翻转）：
 // 翻转前钉在 settings 用户层的显式 false 首启被 unset 一次（marker 仅在
 // 写入成功后落盘，失败下次自愈重试），此后再写的 false 是用户主动选择
