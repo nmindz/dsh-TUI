@@ -296,8 +296,16 @@ const check1 = (name: string, ok: boolean, detail?: string) => {
     invoker.includes('supportsImages(')
     && invoker.includes("installedMeetsVersion('@deepseek-ai/dsh-commands', '0.1.0-rc.8')")
     && invoker.includes('ImagesExecute'))
-  check1('command discovery mirrors the upstream input admission flag (0.1.5 `attachments`, legacy `images` fallback)',
-    /acceptsImages:[^\n]*\battachments\b[^\n]*\bimages\b/.test(skills))
+  // Upstream renamed input.images to input.attachments when the capability
+  // broadened from images to images-and-files. Discovery must still MIRROR
+  // upstream's flag rather than invent an admission rule of its own, so this
+  // pins both halves: the call site defers to the compat helper, and the
+  // helper honors both spellings so one build serves both lines.
+  check1('command discovery mirrors the upstream attachment admission flag (both spellings)',
+    readFileSync(join(root, 'src/dsh-adapter/channel/skill-catalog.ts'), 'utf8')
+      .includes('acceptsImages: acceptsAttachments(descriptor.input)')
+    && readFileSync(join(root, 'src/dsh-adapter/upstream-legacy.ts'), 'utf8')
+      .includes("record['attachments'] === true || record['images'] === true"))
   check1('draft-aware command outcome is additive',
     invoker.includes('Promise<ExternalCommandOutcome | undefined>')
       && channel.includes('runExternalCommandOutcome'))
