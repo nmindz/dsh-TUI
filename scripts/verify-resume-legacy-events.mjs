@@ -305,10 +305,16 @@ cpSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'types', 'dsh-adapter', 'compat', 'sessionLog.js'),
   join(profileCompat, 'sessionLog.js'),
 )
-cpSync(
-  join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'types', 'utils', 'paths.js'),
-  join(tuiPkg, 'lib', 'types', 'utils', 'paths.js'),
-)
+// sessionLog's local dependency closure, copied so the synthetic package
+// resolves its relative imports. Keep this in step with the module's own
+// `../../utils/*` imports; a missing one fails as ERR_MODULE_NOT_FOUND in the
+// child, not as a registration failure.
+for (const util of ['paths.js', 'debug.js']) {
+  cpSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'types', 'utils', util),
+    join(tuiPkg, 'lib', 'types', 'utils', util),
+  )
+}
 writeFileSync(join(tuiPkg, 'package.json'), JSON.stringify({ name: '@deepseek-harness-tui/dsh-tui', version: '0.0.0-fixture', type: 'module' }))
 
 const launcherPath = join(cliTree, 'launcher.js')

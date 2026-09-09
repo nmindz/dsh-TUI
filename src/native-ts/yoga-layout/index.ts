@@ -1478,9 +1478,11 @@ export function setLayoutCacheSlotsForTest(slots: number): void {
   cacheSlots = Math.max(1, Math.min(CACHE_SLOT_CAPACITY, Math.trunc(slots)))
 }
 
-// Off in production: the multi-entry cache serves measure calls only. The
-// negative control turns layout-pass hits back on to show they leave skipped
-// subtrees at measure-scratch geometry.
+// Off in production for PARENTS: a layout-pass hit skips the subtree recursion
+// and leaves it at whatever geometry the last measure probe wrote. Leaves have
+// no subtree to strand, so they keep their layout-pass hits unconditionally
+// (see the leaf carve-out in commitCacheOutputs). The negative control turns
+// parent hits back on to show they leave skipped subtrees at scratch geometry.
 let cacheLayoutPassHits = false
 
 /**
@@ -1658,6 +1660,7 @@ function layoutNode(
     if (
       node._cN > 0 &&
       (!performLayout ||
+        node.children.length === 0 ||
         (cacheLayoutPassHits && node._scratchGen !== _generation)) &&
       (sameGen || !node.isDirty_)
     ) {
