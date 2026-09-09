@@ -84,7 +84,23 @@ export interface StatusBarConfig {
   trajectory: boolean
   /** Idle `? for shortcuts` reminder; shortcut keys remain available when hidden. */
   shortcutHint: boolean
+  /** Render admitted plugin footer segments (`ctx.tuiStatus.setSegment`). */
+  pluginSegments: boolean
+  /**
+   * Explicit footer arrangement. Unset keeps the stock order and lets the
+   * per-field booleans gate; set, it WINS — membership alone decides which
+   * field slots render, and array position decides where.
+   *
+   * Deliberately absent from `DEFAULT_STATUS_BAR` so the frozen defaults stay
+   * boolean-only: `STATUS_BAR_KEYS` and both cordis Schemas derive their shape
+   * from it. The token vocabulary lives with the normalizer in
+   * `tuiDisplayPrefs.ts`, which is the layer that can validate it.
+   */
+  layout?: FooterLayout
 }
+
+/** Footer slot order: built-in field names, plugin segment keys, `|`, `*`. */
+export type FooterLayout = readonly string[]
 
 export interface SessionModeSpec {
   /** Stable id; also the display name unless `label` is set or the id is a

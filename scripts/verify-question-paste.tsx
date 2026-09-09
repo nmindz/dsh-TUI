@@ -25,6 +25,9 @@
  * Drives the real useInput path with fake stdin; output is captured raw
  * and ANSI-stripped (no xterm dependency).
  */
+// Assertions below check Chinese validation and error text.
+import './lib/default-lang-zh.mjs'
+
 process.env.FORCE_COLOR = '3'
 
 const [{ PassThrough, Writable }, React, { Terminal: XTerm }, { AskUserQuestionPanel }, { render }, { settle, settled, sleep, viewportLines }] = await Promise.all([

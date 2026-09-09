@@ -332,6 +332,22 @@ const headers = () => [
 ]
 const source = { list: async () => headers() }
 
+// `SessionPersistence.list()` answers snapshots, not bare headers, and exposes
+// no `listSnapshots` — so this wrapper shape is the ONLY one production takes.
+// Reading it as a bare header drops every entry and the picker reports "no
+// resumable sessions" over intact history.
+const upstreamListSource = {
+  list: async () => headers().map(header => ({ header, revision: `r-${header.id}`, sizeBytes: 64 })),
+}
+const fromSnapshots = await listSummaries(upstreamListSource)
+check('list() returning snapshots is summarized, not dropped',
+  fromSnapshots.map(s => s.id).sort(), ['auto', 'boot', 'prompt'])
+check('a snapshot from list() carries the backend revision into the index',
+  readIndex().get('prompt')?.derived?.revision, 'r-prompt')
+check('an element with neither a nested nor a bare header is skipped alone',
+  (await listSummaries({ list: async () => [{ header: { id: 'kept' } }, { nothing: true }] })).map(s => s.id),
+  ['kept'])
+
 const first = await listSummaries(source)
 check('every listed session is summarized', first.map(s => s.id).sort(), ['auto', 'boot', 'prompt'])
 check('the boot artifact is reported honestly, not hidden here', first.find(s => s.id === 'boot').hasPrompt, false)

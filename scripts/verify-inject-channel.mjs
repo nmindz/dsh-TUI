@@ -22,9 +22,19 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// Unix socket paths are capped by sun_path — 104 bytes on macOS/BSD, 108 on
+// Linux. macOS's per-user $TMPDIR (/var/folders/…) is ~49 chars on its own,
+// which pushes the derived `<home>/.dsh-tui/inject/<session>.sock` to 105 and
+// fails the listen with EINVAL. Pick the shortest usable base so the real
+// socket path stays well inside the limit; the product path is
+// `~/.dsh-tui/...` and never hits this.
+const tmpBase = [tmpdir(), '/tmp']
+  .filter(dir => existsSync(dir))
+  .sort((a, b) => a.length - b.length)[0] ?? tmpdir()
+
 // Point DATA_DIR at a temp home BEFORE importing the module (paths.ts reads
 // homedir at import time).
-const tmpHome = mkdtempSync(join(tmpdir(), 'dsh-inject-'))
+const tmpHome = mkdtempSync(join(tmpBase, 'dsh-inject-'))
 process.env.HOME = tmpHome
 process.env.USERPROFILE = tmpHome
 

@@ -56,6 +56,12 @@ export interface BrowserView {
   readonly emptyCount: number
   /** Ids of those empty sessions, for the cleanup action. */
   readonly emptyIds: readonly string[]
+  /**
+   * In-scope conversations withheld because they are the live session or a
+   * fork ancestor it superseded. Non-zero means "you are already in it", not
+   * "there is nothing here".
+   */
+  readonly hiddenLive: number
 }
 
 /** Live-session facts shared by the directory index and session projection. */
@@ -204,6 +210,18 @@ export function buildView(
     !hiddenLineage.has(session.id) &&
     (filters.allProjects || context.sameProject(context.cwd, session.cwd))
 
+  // Suppressing the live lineage is right, but an empty list has to say which
+  // emptiness it is: a directory with no history reads the same as one whose
+  // only conversation is the one you are sitting in. Counted before `inScope`
+  // rejects them, and only for conversations that would otherwise have been
+  // listed — an empty fork carries nothing to go back to.
+  let hiddenLive = 0
+  for (const session of sessions) {
+    if (!hiddenLineage.has(session.id)) continue
+    if (!session.hasPrompt || session.kind.kind === 'subagent') continue
+    if (filters.allProjects || context.sameProject(context.cwd, session.cwd)) hiddenLive += 1
+  }
+
   // Empty sessions never reach a view, but they are counted — and the count
   // feeds a DESTRUCTIVE action, so it is scoped exactly as the list is.
   // Counting them across every project while showing one project's rows would
@@ -218,11 +236,17 @@ export function buildView(
   }
   const empty = new Set(emptyIds)
 
+  // A session predating branch capture has no recorded branch, and an unknown
+  // branch is not a mismatch: comparing it away hides real history behind a
+  // filter the user reads as "this branch only". Sessions that do record one
+  // still have to match.
+  const onBranch = (session: SessionSummary): boolean =>
+    !filters.branchOnly ||
+    session.branch === undefined ||
+    (context.branch !== undefined && session.branch === context.branch)
+
   const eligible = sessions.filter(
-    session =>
-      inScope(session) &&
-      !empty.has(session.id) &&
-      (!filters.branchOnly || (context.branch !== undefined && session.branch === context.branch)),
+    session => inScope(session) && !empty.has(session.id) && onBranch(session),
   )
 
   const conversations = eligible.filter(session => session.kind.kind !== 'subagent')
@@ -335,6 +359,7 @@ export function buildView(
     hiddenSubagents: filters.showSubagents ? 0 : runs.length,
     emptyCount: emptyIds.length,
     emptyIds,
+    hiddenLive,
   }
 }
 
