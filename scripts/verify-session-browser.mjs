@@ -320,10 +320,14 @@ check('delegated runs are NOT listed by default', !/delegated one/.test(s) && !/
 check('but they are counted', await settled(() => /2 runs folded/.test(flat(screen()))), flat(screen()).slice(0, 200))
 check('a session with no conversation is never a row', !/^\s*❯?\s*tmp\b/m.test(s))
 check('and it is counted too', await settled(() => /1 empty/.test(flat(screen()))), flat(screen()).slice(0, 200))
-check('the count reflects only what is shown', await settled(() => /3 sessions/.test(flat(screen()))), flat(screen()).slice(0, 200))
+// Four conversations, because the browser opens across every working
+// directory: three in /tmp plus the foreign one. Scoping is a choice the user
+// makes from here, not the state they are dropped into.
+check('the count reflects only what is shown', await settled(() => /4 sessions/.test(flat(screen()))), flat(screen()).slice(0, 200))
 check('metadata rides under each title', await settled(() => /2\.0 KB/.test(flat(screen())) && /deepseek-v4-pro/.test(flat(screen()))))
-check('focus starts on the MRU top row (gamma)', await settled(() => /❯\s*[★☆]\s*gamma/.test(screen())), screen().split('\n').filter(l => l.includes('❯')).join('|'))
-check('a foreign directory is hidden until its scope is selected', !/delta other workspace/.test(screen()))
+check('focus starts on the MRU top row (delta)', await settled(() => /❯\s*[★☆]\s*delta/.test(screen())), screen().split('\n').filter(l => l.includes('❯')).join('|'))
+check('a foreign directory is listed in the default scope', /delta other workspace/.test(screen()), flat(screen()).slice(0, 280))
+check('the live directory is listed alongside it', /gamma/.test(screen()) && /alpha/.test(screen()))
 
 // ── explicit working-directory menu ─────────────────────────────────────
 stdin.write('\x1b[D') // ← opens the directory layer
@@ -331,7 +335,11 @@ check('left opens the visible working-directory menu',
   await settled(() => /Choose working directory/.test(flat(screen())) && /All working directories/.test(flat(screen()))),
   flat(screen()).slice(0, 260))
 check('the directory menu exposes the foreign path', /\/other\/project/.test(screen()), flat(screen()).slice(0, 300))
-stdin.write('\x1b[B') // current → foreign (all is above current)
+// The menu opens on the selected entry, which is now "all"; walk down past
+// the live directory to reach the foreign one.
+stdin.write('\x1b[B') // all → current
+await settled(() => /❯\s*▣\s*tmp/.test(screen()))
+stdin.write('\x1b[B') // current → foreign
 check('directory focus moves independently from session focus',
   await settled(() => /❯\s*▣\s*project/.test(screen())),
   screen().split('\n').filter(line => line.includes('❯')).join('|'))

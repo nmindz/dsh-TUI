@@ -18,7 +18,6 @@ import {
   anchorTop,
   buildView,
   buildWorkspaceGroups,
-  DEFAULT_FILTERS,
   moveSelection,
   normalizeWorkspaceCwd,
   seekSelectable,
@@ -28,6 +27,7 @@ import {
   type WorkspaceGroup,
 } from '../sessions/view.js'
 import { t, type I18nKey } from '../i18n.js'
+import { readBrowserFilters, writeBrowserFilters } from '../sessionBrowserPrefs.js'
 import { readSessionPins, setSessionPinned } from '../sessionPins.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
 import type { PreviewEntry, SessionSummary } from '../dsh-adapter/sessions/index.js'
@@ -158,10 +158,14 @@ export function SessionBrowser({
 
   const [sessions, setSessions] = React.useState<readonly SessionSummary[]>([])
   const [loaded, setLoaded] = React.useState(false)
-  const [filters, setFilters] = React.useState<BrowserFilters>(DEFAULT_FILTERS)
+  // One read of the persisted toggles, shared by everything derived from them.
+  // Reading the file once per state would let the scope rail and the filter it
+  // renders disagree if the file changed between the three calls.
+  const [restored] = React.useState<BrowserFilters>(() => readBrowserFilters())
+  const [filters, setFilters] = React.useState<BrowserFilters>(restored)
   const [level, setLevel] = React.useState<BrowserLevel>('sessions')
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = React.useState('current')
-  const [workspaceFocusId, setWorkspaceFocusId] = React.useState('current')
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = React.useState(restored.allProjects ? 'all' : 'current')
+  const [workspaceFocusId, setWorkspaceFocusId] = React.useState(restored.allProjects ? 'all' : 'current')
   const [workspaceQuery, setWorkspaceQuery] = React.useState('')
   const [scopeHovered, setScopeHovered] = React.useState(false)
   // The cursor is a session ID, not a row index.
@@ -306,6 +310,25 @@ export function SessionBrowser({
     setWorkspaceFocusId('current')
     setFilters(current => ({ ...current, allProjects: false }))
   }, [selectedWorkspaceId, workspaceGroups])
+
+  // The three toggles outlive the screen. Persistence watches the committed
+  // value rather than each call site, so it covers every route into them —
+  // the keyboard chords through `applyFilters`, the directory menu through
+  // `chooseWorkspace`, and the correction above — and it compares against what
+  // was last written, so typing in the search box never touches the file. A
+  // failed write is silent: a lost preference is not worth interrupting a
+  // search for.
+  const persistedRef = React.useRef(restored)
+  React.useEffect(() => {
+    const previous = persistedRef.current
+    if (
+      previous.allProjects === filters.allProjects &&
+      previous.branchOnly === filters.branchOnly &&
+      previous.showSubagents === filters.showSubagents
+    ) return
+    persistedRef.current = filters
+    writeBrowserFilters(filters)
+  }, [filters])
 
   const scopeCwd = selectedWorkspace?.cwd ?? channel.cwd
   const scopeSameProject = React.useMemo(

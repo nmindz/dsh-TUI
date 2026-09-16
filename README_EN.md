@@ -110,10 +110,13 @@ the interface, and removing it leaves no core modifications behind.
   session title for ~600ms opens a tooltip with the full content.
 - **Activity animation**: `moon8` is the default. A legacy local `claude`
   setting is read as `moon8`, and the picker lists current presets only.
-- **Complete session workflow**: `/resume` groups history by working directory
-  with search and preview (left-click resumes, right-click opens an action
-  menu; pin frequent sessions — a `Pinned` group floats them to the top, the
-  in-row star or `Ctrl+P` toggles, pins persist in `~/.dsh-tui`), alongside
+- **Complete session workflow**: `/resume` opens across every working directory
+  by default, grouped by directory, with search and preview (`Ctrl+A` narrows
+  back to the current workspace, `Ctrl+S` reveals the folded sub-agent runs,
+  and the scope you leave it in is the scope it reopens in; left-click resumes,
+  right-click opens an action menu; pin frequent sessions — a `Pinned` group
+  floats them to the top, the in-row star or `Ctrl+P` toggles, pins persist in
+  `~/.dsh-tui`), alongside
   `/new`, `/workspace`, `/compact`, `/export`,
   the `/btw` side question, model switching, double-`Esc` rewind through a
   session fork, vim editing for the prompt (`/vim`), mouse selection

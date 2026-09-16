@@ -145,9 +145,20 @@ const population = [
   summary({ id: 'other-project', updatedAt: 40, cwd: '/elsewhere' }),
 ]
 
-const base = buildView(population, DEFAULT_FILTERS, context)
+// The shipped default spans every directory; NARROW is that same view scoped
+// back to one project, which is what the per-project assertions below mean.
+const NARROW = { ...DEFAULT_FILTERS, allProjects: false }
+
+check('the shipped default spans every project', DEFAULT_FILTERS.allProjects, true)
 check(
-  'default view: this project, conversations only, live session excluded',
+  'default view: every project, conversations only, live session excluded',
+  buildView(population, DEFAULT_FILTERS, context).rows.filter(r => r.kind === 'session').map(r => r.session.id),
+  ['conv', 'fork', 'other-project'],
+)
+
+const base = buildView(population, NARROW, context)
+check(
+  'scoped view: this project, conversations only, live session excluded',
   base.rows.filter(r => r.kind === 'session').map(r => r.session.id),
   ['conv', 'fork'],
 )
@@ -170,8 +181,8 @@ check('and named, so they can be cleaned', base.emptyIds, ['empty'])
 // The count drives a destructive action, so its scope must match the list's.
 const withForeignEmpty = [...population, summary({ id: 'empty-elsewhere', cwd: '/elsewhere', hasPrompt: false })]
 check(
-  'another project\'s empty sessions are NOT offered for cleanup from this one',
-  buildView(withForeignEmpty, DEFAULT_FILTERS, context).emptyIds,
+  'another project\'s empty sessions are NOT offered for cleanup from a scoped view',
+  buildView(withForeignEmpty, NARROW, context).emptyIds,
   ['empty'],
 )
 check(
@@ -181,7 +192,7 @@ check(
 )
 check(
   'a search narrows the rows but never what "empty" means',
-  buildView(withForeignEmpty, { ...DEFAULT_FILTERS, query: 'render' }, context).emptyIds,
+  buildView(withForeignEmpty, { ...NARROW, query: 'render' }, context).emptyIds,
   ['empty'],
 )
 check('an empty session is never a row', base.rows.every(r => r.kind !== 'session' || r.session.id !== 'empty'), true)
@@ -264,7 +275,7 @@ check(
   [['/current', 2], ['/foreign/path', 2]],
 )
 
-const runs = buildView(population, { ...DEFAULT_FILTERS, showSubagents: true }, context)
+const runs = buildView(population, { ...NARROW, showSubagents: true }, context)
 check(
   'sub-agent runs appear indented under their parent',
   runs.rows.filter(r => r.kind === 'session').map(r => [r.session.id, r.depth]),
@@ -272,16 +283,16 @@ check(
 )
 check('nothing is hidden once runs are shown', runs.hiddenSubagents, 0)
 
-const branch = buildView(population, { ...DEFAULT_FILTERS, branchOnly: true }, context)
+const branch = buildView(population, { ...NARROW, branchOnly: true }, context)
 check(
   'branch filter keeps only sessions last used on this branch',
   branch.rows.filter(r => r.kind === 'session').map(r => r.session.id),
   ['conv'],
 )
 
-const searched = buildView(population, { ...DEFAULT_FILTERS, query: 'RENDER' }, context)
+const searched = buildView(population, { ...NARROW, query: 'RENDER' }, context)
 check('search is case-insensitive over titles', searched.rows.filter(r => r.kind === 'session').map(r => r.session.id), ['conv'])
-const byLabel = buildView(population, { ...DEFAULT_FILTERS, showSubagents: true, query: 'audit' }, context)
+const byLabel = buildView(population, { ...NARROW, showSubagents: true, query: 'audit' }, context)
 check(
   'a parent is kept when one of its runs matches, and only the matching run shows',
   byLabel.rows.filter(r => r.kind === 'session').map(r => r.session.id),
@@ -289,7 +300,7 @@ check(
 )
 const byParentText = buildView(
   population,
-  { ...DEFAULT_FILTERS, showSubagents: true, query: 'render' },
+  { ...NARROW, showSubagents: true, query: 'render' },
   context,
 )
 check(
@@ -297,13 +308,13 @@ check(
   byParentText.rows.filter(r => r.kind === 'session').map(r => r.session.id),
   ['conv', 'run1', 'run2'],
 )
-const noMatch = buildView(population, { ...DEFAULT_FILTERS, query: 'zzz' }, context)
+const noMatch = buildView(population, { ...NARROW, query: 'zzz' }, context)
 check('a query that matches nothing yields no rows', noMatch.rows.length, 0)
 
 // A run whose parent is filtered out must still be reachable rather than lost.
 const orphaned = buildView(
   [summary({ id: 'run', kind: { kind: 'subagent', parent: 'gone', depth: 1 } })],
-  { ...DEFAULT_FILTERS, showSubagents: true },
+  { ...NARROW, showSubagents: true },
   context,
 )
 check(
