@@ -20,6 +20,9 @@
  * Run: `node scripts/verify-session-browser-layout.mjs`
  * Exits 1 on any failed assertion (CI gate).
  */
+// FIRST, before any lib import: the browser persists its scope toggles under
+// DATA_DIR, and driving it here must not rewrite the real profile's view.
+import './lib/fake-home.mjs'
 import { Writable, PassThrough } from 'node:stream'
 import xtermPkg from '@xterm/headless'
 import React from 'react'

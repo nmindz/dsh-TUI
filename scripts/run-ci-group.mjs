@@ -374,6 +374,10 @@ const GROUPS = {
 // Esc 先清查询再退出、rename 后光标按 id 跟随目标（不是按行号）、
 // confirm-delete 只认无修饰 Enter、Esc 取消。真实 Chat 渲染驱动。
     ["verify-session-browser", ['node', 'scripts/verify-session-browser.mjs']],
+// 浏览器默认范围与持久化：默认跨全部工作目录、子运行仍折叠、收窄回单个
+// 项目仍精确；三个开关经 ~/.dsh-tui 往返而搜索词永不恢复；文件缺失、损坏、
+// 非对象、单字段类型错误都退回默认而不抛异常（raw 模式下抛异常最致命）。
+    ["verify-session-browser-defaults", ['node', 'scripts/verify-session-browser-defaults.mjs']],
 // 会话浏览器布局压测：8 种几何 × 中英双语 × 9 个交互状态，用 xterm 的
 // isWrapped 断言没有任何一行溢出终端宽度，并要求提示行始终是最后一行
 // （等价于「上方每个区域都放得下、没有多占行、没有被挤出屏幕」）。

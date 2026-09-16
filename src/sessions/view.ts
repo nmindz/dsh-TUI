@@ -30,10 +30,10 @@ export interface BrowserFilters {
   readonly showSubagents: boolean
 }
 
-/** The browser's default view: this project, conversations only. */
+/** The browser's default view: every project, conversations only. */
 export const DEFAULT_FILTERS: BrowserFilters = {
   query: '',
-  allProjects: false,
+  allProjects: true,
   branchOnly: false,
   showSubagents: false,
 }
