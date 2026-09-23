@@ -23,6 +23,13 @@ const MIGRATIONS_FILE = 'migrations.json'
 export const FULLSCREEN_FACTORY_MIGRATION = 'fullscreen-factory-default'
 
 /**
+ * The settings-service switch (harness 0.1.7): settings.yaml was imported
+ * once into the profile patch and renamed, before the dsh-tui entry had live
+ * fields, so our section survived only in `settings.yaml.imported`.
+ */
+export const RETIRED_SETTINGS_IMPORT_MIGRATION = 'settings-yaml-dsh-tui'
+
+/**
  * Read the applied-migration map.
  * @param dir - Prefs directory (injectable for tests).
  * @returns Parsed migration map; empty on any read/parse failure.

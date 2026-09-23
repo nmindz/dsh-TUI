@@ -1,53 +1,66 @@
+/**
+ * The agent-preset declarations the TUI bundle ships (presets/*.patch.yml):
+ * generated copies are current, every row validates as an
+ * `@deepseek-ai/dsh-agent-preset` declaration, every plugin row names a module
+ * the installation can load, and the copies of official presets yield to
+ * web-app's rows in mixed profiles.
+ *
+ * Run: node scripts/verify-packaged-presets.mjs
+ */
 import assert from 'node:assert/strict'
-import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverPresets } from '@deepseek-ai/dsh-agent-presets'
-import { ensurePackagedPresets, packagedPresetRoot } from '../lib/types/dsh-adapter/packaged-presets.js'
+import { parse } from 'yaml'
+import AgentPreset from '@deepseek-ai/dsh-agent-preset'
+import { entryListProblem } from '@deepseek-ai/dsh-agent-preset-registry'
 
-const workspace = new URL('..', import.meta.url)
-const packagedRoot = join(fileURLToPath(workspace), 'presets')
-const temporary = await mkdtemp(join(tmpdir(), 'dsh-tui-presets-'))
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+const OFFICIAL = ['standard', 'ptc', 'minimal', 'cordis']
+const DECLARED = [...OFFICIAL, 'liangshen']
+const PACKAGE_PREFIX = '@deepseek-harness-tui/dsh-tui/'
+// Row names resolve from the dsh installation first; web-app depends on every
+// package its presets name, so its location stands in for the installation.
+const installation = createRequire(createRequire(join(root, 'package.json')).resolve('@deepseek-ai/dsh-web-app/package.json'))
+const yamlTags = [{ tag: 'tag:yaml.org,2002:js', resolve: source => ({ __jsExpr: source }) }]
 
-try {
-  assert.equal(packagedPresetRoot(), packagedRoot)
-  const dshHome = join(temporary, 'home')
-  assert.deepEqual(ensurePackagedPresets({ dshHome, sourceRoot: packagedRoot }), [
-    { id: 'liangshen', status: 'installed' },
-  ])
-  assert.deepEqual(ensurePackagedPresets({ dshHome, sourceRoot: packagedRoot }), [
-    { id: 'liangshen', status: 'current' },
-  ])
+execFileSync(process.execPath, [join(root, 'scripts', 'sync-web-presets.mjs'), '--check'], { stdio: 'inherit' })
 
-  const discovered = await discoverPresets([
-    { path: join(dshHome, '.agent-presets'), trust: 'user' },
-  ], workspace)
-  const liangshen = discovered.find(preset => preset.id === 'liangshen')
-  assert.equal(liangshen?.name, '梁神模式')
-  assert.equal(liangshen?.broken, undefined)
+assert.deepEqual(manifest.dsh.bundle.patch, ['./cordis.patch.yml', ...DECLARED.map(id => `./presets/${id}.patch.yml`)],
+  'dsh.bundle.patch lists the bundle patch, then every preset declaration')
+assert.ok(manifest.files.includes('presets'), 'the presets directory ships in the package')
 
-  const conflictingHome = join(temporary, 'conflicting-home')
-  const conflictingPreset = join(conflictingHome, '.agent-presets', 'liangshen')
-  await mkdir(conflictingPreset, { recursive: true })
-  await writeFile(join(conflictingPreset, 'keep.txt'), 'user-owned\n')
-  assert.deepEqual(ensurePackagedPresets({ dshHome: conflictingHome, sourceRoot: packagedRoot }), [
-    { id: 'liangshen', status: 'conflict' },
-  ])
-  assert.equal(await readFile(join(conflictingPreset, 'keep.txt'), 'utf8'), 'user-owned\n')
-
-  const nextRoot = join(temporary, 'next')
-  await cp(packagedRoot, nextRoot, { recursive: true })
-  const markerPath = join(nextRoot, 'liangshen', '.dsh-tui-managed.json')
-  const marker = JSON.parse(await readFile(markerPath, 'utf8'))
-  marker.revision = `${marker.revision}-test-update`
-  await writeFile(markerPath, `${JSON.stringify(marker, null, 2)}\n`)
-  assert.deepEqual(ensurePackagedPresets({ dshHome, sourceRoot: nextRoot }), [
-    { id: 'liangshen', status: 'updated' },
-  ])
-  assert.equal(JSON.parse(await readFile(join(dshHome, '.agent-presets', 'liangshen', '.dsh-tui-managed.json'), 'utf8')).revision, marker.revision)
-} finally {
-  await rm(temporary, { recursive: true, force: true })
+/** Every non-group row name of a (possibly nested) entry list. */
+function rowNames(rows) {
+  return rows.flatMap(row => (row.group === true ? rowNames(row.config) : [row.name]))
 }
 
-console.log('packaged presets OK (install, discover, preserve conflict, update)')
+const ids = new Set()
+for (const id of DECLARED) {
+  const document = parse(readFileSync(join(root, 'presets', `${id}.patch.yml`), 'utf8'), { customTags: yamlTags })
+  assert.equal(document.length, 1, `${id}: one insert block`)
+  const [row] = document[0].insert
+  assert.equal(row.id, `dsh-tui-preset-${id}`, `${id}: scoped row id`)
+  assert.equal(row.name, '@deepseek-ai/dsh-agent-preset', `${id}: declaration row`)
+  const config = AgentPreset.Config(row.config)
+  assert.equal(config.id, id, `${id}: preset id`)
+  assert.ok(!ids.has(config.id), `${id}: unique preset id`)
+  ids.add(config.id)
+  assert.equal(entryListProblem(config.plugins), undefined, `${id}: plugin rows validate`)
+  for (const name of rowNames(config.plugins)) {
+    if (name.startsWith(PACKAGE_PREFIX)) {
+      const exported = name.slice(PACKAGE_PREFIX.length)
+      assert.ok(existsSync(join(root, exported)), `${id}: ${name} names a shipped file`)
+      assert.ok(Object.keys(manifest.exports).some(key => new RegExp(`^${key.slice(2).replace('*', '[^/]+')}$`, 'u').test(exported)), `${id}: ${name} is exported`)
+      continue
+    }
+    assert.doesNotThrow(() => installation.resolve(name), `${id}: ${name} resolves from the installation`)
+  }
+  const yieldsToOfficial = typeof row.disabled === 'object' && String(row.disabled.__jsExpr).includes(`'preset-${id}'`)
+  assert.equal(yieldsToOfficial, OFFICIAL.includes(id), `${id}: ${OFFICIAL.includes(id) ? 'yields to web-app\'s row' : 'has no official row to yield to'}`)
+}
+
+console.log(`preset declarations OK (${DECLARED.join(', ')})`)

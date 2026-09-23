@@ -5,9 +5,8 @@ import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as toolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import Schema from '@deepseek-ai/schemastery'
-import { Config } from './index.js'
+import type { Config, ResolvedConfig } from './index.js'
+import { readLiveSettings, readRetiredSettingsSection, settingsNamespaceOf, snapshotConfig } from './live-settings.js'
 import { createChannel } from './channel.js'
 import { createChannelSceneOutlet } from './channel-scene-outlet.js'
 import { mountChannelUi } from './channel-ui.js'
@@ -23,14 +22,13 @@ import { adapterRuntimeFor } from '../adapter/kernel/runtime-context.js'
 import { ApprovalStore, bindApprovalStore } from './approvals.js'
 import { registerPromptDebug } from './promptDebug.js'
 import { readActivityFrames } from '../activityPrefs.js'
-import { commitFullscreenFactoryMigration, planFullscreenFactoryMigration, readAppliedMigrations } from '../migrationPrefs.js'
+import { RETIRED_SETTINGS_IMPORT_MIGRATION, commitFullscreenFactoryMigration, markMigrationApplied, planFullscreenFactoryMigration, readAppliedMigrations } from '../migrationPrefs.js'
 import { readModelPref } from '../modelPrefs.js'
 import { explicitModelRoute, recordedModelRoute, resolveModelRoute, validateModelRoute } from '../modelRoute.js'
 import type { ModelRoute } from '../modelRoute.js'
 import { migratePresetPref, readPresetPref } from '../presetPrefs.js'
 import { readEffortPref } from '../effortPrefs.js'
 import { composePreset, filterMinimalPresetTools, resolvePersistedPreset, resolvePersistedRoute, runningPresetOf } from './presets.js'
-import { ensurePackagedPresets } from './packaged-presets.js'
 import { ensureLegacySessionEventTypes, snapshotLiveSessionEvents } from './compat/index.js'
 import { clearResumeTarget, resumeTargetFromArgv, writeResumeTarget } from '../sessionHistory.js'
 import { readHomePrefs } from '../homePrefs.js'
@@ -142,7 +140,10 @@ export function resolveTuiHostMode(
   return explicitTuiLaunch ? 'invalid-explicit-launch' : 'headless-host'
 }
 
-export async function apply(ctx: Context, config: Config): Promise<void> {
+export async function apply(ctx: Context, resolved: ResolvedConfig | Config): Promise<void> {
+  // Live settings read here are the boot values; the settings block below
+  // re-reads the references on every edit.
+  const config = snapshotConfig(resolved)
   // /restart handoff diagnosis: the replacement process is marked by env and
   // logs its boot progress to ~/.dsh-tui/restart.log (ordinary launches stay
   // silent). First line lands before anything in this function can throw.
@@ -215,24 +216,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       'dsh-tui: non-interactive host detected (stdout is not a TTY); skipping the TUI frontend',
     )
     return
-  }
-
-  // The official profile launcher owns the system preset root and replaces
-  // any bundle-supplied roots at boot. Install dsh-tui's bundled presets via
-  // the roster's supported user-root seam before resolving the first agent.
-  // Never overwrite an existing directory unless it carries our marker.
-  try {
-    for (const result of ensurePackagedPresets()) {
-      if (result.status === 'conflict') {
-        ctx.logger.warn(
-          `dsh-tui: packaged preset "${result.id}" was not installed because an unmanaged preset already uses that id`,
-        )
-      }
-    }
-  } catch (error) {
-    // A read-only home must not make the whole terminal unusable; the other
-    // official and user presets remain available.
-    ctx.logger.warn(`dsh-tui: unable to install packaged presets (${error instanceof Error ? error.message : String(error)})`)
   }
 
   // UI language resolution: DSH_TUI_LANG env var wins, then the
@@ -607,101 +590,24 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     resolveSettingsReady = () => resolve()
     setTimeout(resolve, 300)
   })
-  // Register the dsh-tui settings namespace so the /settings screen can
-  // edit it (the section below was '命名空间未注册' without this): the
-  // user layer in settings.yaml wins over cordis.yml's diffLayout, and
-  // watch() lands commits on the live channel — no recompose needed.
+  // The dsh-tui settings are this plugin's own volatile Config fields: the
+  // settings service projects them into the /settings form under our Loader
+  // entry id and writes edits into the profile patch, and the Loader updates
+  // the references in place. A write, or a hand edit of the profile file,
+  // ends with `settings/document-updated` for the namespace.
   ctx.inject(['settings'], (settingsCtx) => {
-    // alpha.2 removed the `settingsNamespace()` brand helper: register() now
-    // takes the raw string and validates it itself, while rc.2 still wants the
-    // branded handle. Brands are type-only, so the constant cast compiles
-    // against both lines and the runtime value is identical ('dsh-tui' always
-    // satisfied the namespace pattern).
-    const tuiSettingsNs = 'dsh-tui' as SettingsNamespace
-    const scope = settingsCtx.settings.register(
-      tuiSettingsNs,
-      Schema.object({
-        diffLayout: Schema.union(['auto', 'split', 'unified']).default('auto'),
-        thinkingFold: Schema.union(['preview', 'full']).default('preview'),
-        toolBackground: Schema.union(['none', 'subtle', 'strong']).default('none'),
-        scrollGutter: Schema.union(['timeline', 'scrollbar', 'hidden']).default('timeline'),
-        // Preset names AND custom `NxM` specs (the settings field's parse
-        // gate keeps junk out of the user layer; the transform normalizes
-        // whatever survives — cordis.yml junk included).
-        pageMargin: Schema.transform(
-          Schema.string().default('normal'),
-          value => normalizePageMargin(value),
-        ),
-        // No default on purpose (same rule as `fullscreen` below): a schema
-        // default here would come back from scope.get()/watch() and shadow
-        // an explicit cordis.yml `foldTerminalCommand: true` while the
-        // settings user layer is unset — applyDisplay's
-        // `?? config.foldTerminalCommand ?? false` already supplies the
-        // default and keeps cordis.yml decisive.
-        foldTerminalCommand: Schema.boolean(),
-        promptSessionLabel: Schema.boolean().default(false),
-        // No schema default (same rule as foldTerminalCommand): applyDisplay
-        // resolves `?? config.expandEditor ?? true` so cordis.yml stays
-        // decisive while the user layer is unset.
-        expandEditor: Schema.boolean(),
-        // Same no-default rule: applyDisplay resolves `?? config.smoothStreaming ?? true`.
-        smoothStreaming: Schema.boolean(),
-        // Same no-default rule: applyDisplay resolves `?? config.mermaidDiagrams ?? true`.
-        mermaidDiagrams: Schema.boolean(),
-        // No default on purpose: unset keeps the boot chain decisive
-        // (applyEffortDefault hands `undefined` to channel.setDefaultEffort,
-        // which resolves cordis.yml `effort` → effort.json → adapter default).
-        effortDefault: Schema.string(),
-        statusBar: Schema.object({
-          compact: Schema.boolean().default(DEFAULT_STATUS_BAR.compact),
-          model: Schema.boolean().default(DEFAULT_STATUS_BAR.model),
-          thinking: Schema.boolean().default(DEFAULT_STATUS_BAR.thinking),
-          cwd: Schema.boolean().default(DEFAULT_STATUS_BAR.cwd),
-          contextUsage: Schema.boolean().default(DEFAULT_STATUS_BAR.contextUsage),
-          cache: Schema.boolean().default(DEFAULT_STATUS_BAR.cache),
-          tokens: Schema.boolean().default(DEFAULT_STATUS_BAR.tokens),
-          cost: Schema.boolean().default(DEFAULT_STATUS_BAR.cost),
-          tps: Schema.boolean().default(DEFAULT_STATUS_BAR.tps),
-          gitBranch: Schema.boolean().default(DEFAULT_STATUS_BAR.gitBranch),
-          sessionTitle: Schema.boolean().default(DEFAULT_STATUS_BAR.sessionTitle),
-          sessionId: Schema.boolean().default(DEFAULT_STATUS_BAR.sessionId),
-          goal: Schema.boolean().default(DEFAULT_STATUS_BAR.goal),
-          mode: Schema.boolean().default(DEFAULT_STATUS_BAR.mode),
-          contextBar: Schema.boolean().default(DEFAULT_STATUS_BAR.contextBar),
-          activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
-          trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
-          shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
-          pluginSegments: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginSegments),
-          // Explicit footer arrangement. Set, it overrides every field
-          // switch above; `|` splits left from the right-aligned group.
-          layout: Schema.array(Schema.string()).default([]),
-        }).default({ ...DEFAULT_STATUS_BAR, layout: [] }),
-        // Header pixel whale art; on unless settings.yaml says otherwise.
-        whale: Schema.boolean().default(true),
-        // Idle whale behaviors after the intro settles; on by default —
-        // the idle-wakeup gate stays: an explicit `false` keeps the settled
-        // header timer-free.
-        whaleIdle: Schema.boolean().default(true),
-        // Minimal mode: strips the header splash, emoji glyphs, and
-        // decorative colors; code highlight and tool colors stay.
-        minimal: Schema.boolean().default(false),
-        // No default on purpose: an unset `lang` keeps the field showing
-        // the effective language (see the section's format below) and lets
-        // cordis.yml / lang.json keep their precedence.
-        lang: Schema.union(['zh', 'en']),
-        // Same no-default rule: unset keeps cordis.yml's `fullscreen`
-        // decisive; set overrides it from the next boot on.
-        fullscreen: Schema.boolean(),
-        // Unset inherits cordis.yml; a saved choice takes effect after restart.
-        terminalImages: Schema.boolean(),
-        // Built-in action-shortcut overrides, one optional combo string per
-        // action (see the keymap utility). Unset keeps the default binding
-        // and the section's format() shows the effective combos.
-        shortcuts: Schema.object(
-          Object.fromEntries(SHORTCUT_ACTIONS.map(action => [action.id, Schema.string().required(false)])),
-        ).required(false),
-      }),
-    )
+    const tuiSettingsNs = settingsNamespaceOf(ctx)
+    const settingsService = settingsCtx.settings
+    const userLayer = (): SettingsValue =>
+      (settingsService.describe().find(row => row.ns === tuiSettingsNs)?.user ?? {}) as SettingsValue
+    const scope = {
+      get: (): SettingsValue => readLiveSettings(resolved) as SettingsValue,
+      watch(listener: (value: SettingsValue) => void): void {
+        settingsCtx.on('settings/document-updated', (ns) => {
+          if (ns === tuiSettingsNs) listener(readLiveSettings(resolved) as SettingsValue)
+        })
+      },
+    }
     type SettingsValue = {
       diffLayout?: 'auto' | 'split' | 'unified'
       lang?: 'zh' | 'en'
@@ -841,15 +747,32 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // not an explicit undefined), and the later watch commit (fullscreen
     // back to undefined) leaves the fullscreen decision unchanged.
     const bootSettings = scope.get()
-    const fullscreenMigration = planFullscreenFactoryMigration(bootSettings.fullscreen, readAppliedMigrations())
-    void commitFullscreenFactoryMigration(fullscreenMigration, {
-      unset: () => settingsCtx.settings.mutate(tuiSettingsNs, [{ op: 'unset', path: ['fullscreen'] }]),
+    apply(bootSettings)
+    // The settings service describes and writes only ACTIVE entries, and this
+    // entry becomes active once apply returns: carry the retired settings.yaml
+    // section after the Loader settles. It ran its own one-shot import before
+    // this entry had live fields, so our section survived only in the renamed
+    // file. That file is also the only place a stale pre-flip
+    // `fullscreen: false` can still live, so the fullscreen migration drops it
+    // here instead of clearing a user layer.
+    const loaderSettled = (ctx.root as unknown as { loader?: { await(): Promise<unknown> } }).loader?.await() ?? Promise.resolve()
+    void loaderSettled.then(async () => {
+      const migrations = readAppliedMigrations()
+      if (migrations[RETIRED_SETTINGS_IMPORT_MIGRATION] !== undefined) return
+      const retired = readRetiredSettingsSection() ?? {}
+      const fullscreenMigration = planFullscreenFactoryMigration(retired['fullscreen'], migrations)
+      await commitFullscreenFactoryMigration(fullscreenMigration === 'unset' ? 'mark' : fullscreenMigration, { unset: () => Promise.resolve() })
+      if (fullscreenMigration === 'unset') notifyChannel(t('settings-fullscreen-migrated'), { color: 'warning' })
+      const current = userLayer() as Record<string, unknown>
+      // `lang` already lives in lang.json (applyLang mirrored it). A profile
+      // write restates the whole dsh-tui row, so it is not worth one field.
+      const carried = Object.fromEntries(Object.entries(retired).filter(([key]) =>
+        key !== 'lang' && current[key] === undefined && !(key === 'fullscreen' && fullscreenMigration === 'unset')))
+      if (Object.keys(carried).length > 0) await withHostRootCapability(() => settingsService.update(tuiSettingsNs, carried))
+      markMigrationApplied(RETIRED_SETTINGS_IMPORT_MIGRATION)
+    }).catch((error: unknown) => {
+      ctx.logger.warn('dsh-tui: carrying settings from settings.yaml.imported failed: %s', String(error))
     })
-    if (fullscreenMigration === 'unset') {
-      notifyChannel(t('settings-fullscreen-migrated'), { color: 'warning' })
-    }
-    const { fullscreen: staleFullscreen, ...migratedSettings } = bootSettings
-    apply(fullscreenMigration === 'unset' ? migratedSettings : bootSettings)
     let lastTerminalImages = bootSettings.terminalImages ?? config.terminalImages ?? true
     scope.watch(next => {
       apply(next)

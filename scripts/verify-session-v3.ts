@@ -38,7 +38,7 @@ const { SubagentActivityStore } = await import('../src/dsh-adapter/subagents.js'
 function session(id: string, parent?: Session) {
   const seed = parent?.snapshotEvents() ?? []
   return Session.create(SessionId(id), seed, {
-    version: 3, id: SessionId(id), createdAt: 1, cwd, agentPreset: 'liangshen', isSeeded: parent !== undefined,
+    version: 4, id: SessionId(id), createdAt: 1, cwd, agentPreset: 'liangshen', isSeeded: parent !== undefined,
     ...(parent === undefined ? {} : { parentSession: parent.id, isSeeded: true }),
   }, SessionLogOffset(seed.length))
 }
@@ -216,7 +216,10 @@ try {
     prompt(child, 'child prompt')
     const grandchild = session('grandchild', child)
     prompt(grandchild, 'grandchild prompt')
+    // V4 admits a request header only inside an open turn.
+    grandchild.append('turn/start', { turn: 1 })
     grandchild.append('request/header', { reason: 'initial', header: { config: { provider: 'deepseek', model: 'saved-model' } } })
+    grandchild.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     for (const s of [parent, child, grandchild]) {
       const writer = await store.create(s.header, { inheritedEventCount: s.inheritedEventCount })
       try { await writer.append(s.snapshotEvents()); await writer.flush() }

@@ -25,6 +25,8 @@ Profile 启动按顺序叠加：
 > 覆盖某一行时，`config` 是整块替换，不是逐字段深合并。需要继续生效的字段必须
 > 在用户补丁中全部重写。
 
+> 首次启动时，0.1.7 会把旧版 `~/.dsh/settings.yaml` 一次性导入到**先启动的那个 profile**（并把该文件改名为 `settings.yaml.imported`）；同时装了多个 profile（例如 `web` 与 `tui`）时，后启动的 profile 拿不到共享区块（`llm-pi-ai` 下的 provider、`agent-default-model`、`permission`），需要把这些行手动复制进它自己的 `cordis.patch.yml`。
+
 ## TUI 配置
 
 下面是完整的常用覆盖示例：
@@ -54,7 +56,7 @@ Profile 启动按顺序叠加：
 | `model` | Harness `agentDefaultModel`；裸组合回落 `deepseek-flash` | 启动模型；`/model` 可通过 session fork 实时切换 |
 | `cwd` | 启动目录所在的 git worktree 根（不在任何 worktree 内时为 `process.cwd()`；家目录的 dotfiles 仓不算） | TUI 会话侧工作区：agent meta、`@` 补全/提及展开、/resume 过滤、状态栏；恢复已有会话时以该会话持久化的 cwd 为准。注意 bash/fs-policy/sandbox 的根仍由组合层 cordis 配置决定（默认启动目录，归 dsh-base 管），与这里的会话侧 cwd 可能不同 |
 | `workspace` | 未设置 | 启动工作区目标；可用本地路径、`file://` URI 或插件提供的 URI，设置后优先于 `cwd` |
-| `effort` | 配置层通常为 `max` | 每个请求实际生效的推理等级（按运行时模型档位校验，非法档位静默回落默认；兼作顶栏启动显示）。优先级：/settings 的默认推理强度 `effortDefault`（settings.yaml 用户层，`auto` 时让位）> 本字段 > `/effort` 持久化选择（`~/.dsh-tui/effort.json`）> 模型默认 |
+| `effort` | 配置层通常为 `max` | 每个请求实际生效的推理等级（按运行时模型档位校验，非法档位静默回落默认；兼作顶栏启动显示）。优先级：/settings 的默认推理强度 `effortDefault`（profile `cordis.patch.yml` 用户层的 `dsh-tui` 行，`auto` 时让位）> 本字段 > `/effort` 持久化选择（`~/.dsh-tui/effort.json`）> 模型默认 |
 | `modes` | 内置三档 | Shift+Tab 会话模式循环（plan/sandbox/approval 原子组合）；缺省为 默认 → 计划 → 完全访问 |
 | `activity` | `true` | 是否显示实时工作状态行 |
 | `activityFrames` | `moon8` | 工作状态动画预设；也可通过 `/activity` 修改。旧配置值 `claude` 读取时映射为 `moon8`，选择器不再显示该旧预设 |
@@ -159,7 +161,9 @@ Profile 启动按顺序叠加：
 
 ## Agent Preset
 
-每个会话通过 `@deepseek-ai/dsh-agent-presets` 组合模型可见的工具和提示词：
+每个会话通过 `@deepseek-ai/dsh-agent-preset` 行组合模型可见的工具和提示词，各行经 `@deepseek-ai/dsh-agent-preset-registry` 注册，不再扫描目录。
+
+内置 `standard`/`ptc`/`minimal`/`cordis` 四个由 `scripts/sync-web-presets.mjs` 从官方 `@deepseek-ai/dsh-web-app` 生成，`liangshen` 是本包自带；每个都以自己的 `presets/<id>.patch.yml` 声明一行 `@deepseek-ai/dsh-agent-preset`，并在对应的官方 `preset-<id>` 行已启用时自行禁用，避免同一 profile 内 web app 与 dsh-tui 重复注册同一 preset。
 
 | ID | 名称 | 能力 |
 | --- | --- | --- |
@@ -203,8 +207,7 @@ Profile 启动按顺序叠加：
 
 ### 自定义 preset
 
-自定义 preset 放在 `$DSH_HOME/.agent-presets/<name>/`，目录中应包含
-`agent.cordis.yml`。默认 `DSH_HOME` 下的路径即 `~/.dsh/.agent-presets/`。
+`$DSH_HOME/.agent-presets/` 不再被扫描。自定义 preset 改为在 profile 的`cordis.patch.yml` 里插入一行 `@deepseek-ai/dsh-agent-preset`（`config` 为`{ id, name, description, order, plugins: [...] }`）；行形状参考本包自带的`presets/standard.patch.yml`。
 
 从 0.3 起，模型侧工具、plan、compaction、delegation 等由 preset 自己组合。
 Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETAIN`
@@ -287,13 +290,13 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETA
 - 只有非环境变量来源的密钥才写库；与其他 provider 共用的密钥删除时保留。
 - 逐项菜单细节见[用户指南](user-guide.md)。
 
-**路由认领与冲突**：dsh-auth 默认认领 `openai-codex`、`anthropic`、`xai` 三条 llm 路由，无论是否已登录。llm 注册表先到先得，两个 adapter 家族都异步注册，因此 settings.yaml 里 `llm-pi-ai:` 配置的同名路由可能被抢占——被抢占的一方只在 harness 日志里报错。dsh-auth 的路由未登录时目录为空，`/model` 因此把该 provider 显示为「无可用模型」而不是隐藏它。要让 `llm-pi-ai` 的同名路由生效，用 `DSH_TUI_OAUTH_PROVIDERS` 去掉冲突路由（例：`DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`）；dsh-auth 拒绝空列表，完全不要订阅登录就在 profile patch 里 `disabled: true` 整行禁用。
+**路由认领与冲突**：dsh-auth 默认认领 `openai-codex`、`anthropic`、`xai` 三条 llm 路由，无论是否已登录。llm 注册表先到先得，两个 adapter 家族都异步注册，因此 profile `cordis.patch.yml` 里 `llm-pi-ai` 行 `config.providers` 配置的同名路由可能被抢占——被抢占的一方只在 harness 日志里报错。dsh-auth 的路由未登录时目录为空，`/model` 因此把该 provider 显示为「无可用模型」而不是隐藏它。要让 `llm-pi-ai` 的同名路由生效，用 `DSH_TUI_OAUTH_PROVIDERS` 去掉冲突路由（例：`DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`）；dsh-auth 拒绝空列表，完全不要订阅登录就在 profile patch 里 `disabled: true` 整行禁用。
 
 写入位置：
 
 | 产物 | 位置 |
 | --- | --- |
-| provider profile | `~/.dsh/settings.yaml` 的 `llm-pi-ai.providers.<路由名>`，写入即注册路由，删除即注销 |
+| provider profile | profile `cordis.patch.yml` 里 `llm-pi-ai` 行的 `config.providers.<路由名>`，写入即注册路由，删除即注销 |
 | API key | `~/.dsh/.credentials.yaml`（0600），引用名为 `<路由名大写>_API_KEY` |
 
 捆绑 dsh-auth 挂载时，添加分支多出**订阅账号登录（OAuth）**：ChatGPT / Claude /

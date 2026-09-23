@@ -17,6 +17,10 @@
  *    system prompt became derived history (surface node 0, a
  *    `system/message` event). Reading it structurally keeps the older line
  *    working and yields `undefined` on the newer one.
+ *  - **Retired message shapes.** Session V4 dropped the `tool-result` block
+ *    (tool results are `role: 'tool'` messages) and the catch-all `plugin`
+ *    source (compaction checkpoints are `compact-checkpoint`). V3 logs keep
+ *    both, so the readers accept either.
  *
  * Everything here narrows from `unknown` and returns a fallback; nothing
  * throws. That is the same discipline `sessions/header.ts` applies to
@@ -25,7 +29,7 @@
  *
  * @module @deepseek-harness-tui/dsh-tui/upstream-legacy
  */
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 /** The retired `assistant/chunk` event type, as it appears in durable logs. */
 export const ASSISTANT_CHUNK_TYPE = 'assistant/chunk'
@@ -124,6 +128,56 @@ export function legacyHeaderSystem(header: unknown): string | undefined {
   if (header === null || typeof header !== 'object') return undefined
   const system = (header as Record<string, unknown>)['system']
   return typeof system === 'string' ? system : undefined
+}
+
+/** A tool result's model-visible blocks and failure flag. */
+export interface ToolResultPayload {
+  readonly content: readonly ContentBlock[]
+  readonly isError: boolean
+}
+
+const NO_TOOL_RESULT: ToolResultPayload = Object.freeze({ content: Object.freeze([]), isError: false })
+
+/**
+ * The blocks inside a retired V3 `tool-result` wrapper block.
+ *
+ * Session V4 made tool results first-class `role: 'tool'` messages whose own
+ * `content` is the result; V3 logs still nest it one block deeper.
+ * @param block - Any content block, typed or foreign.
+ * @returns The wrapped blocks, or undefined when it is not a V3 wrapper.
+ */
+export function legacyToolResultBlock(block: unknown): ToolResultPayload | undefined {
+  if (block === null || typeof block !== 'object') return undefined
+  const record = block as Record<string, unknown>
+  if (record['type'] !== 'tool-result' || !Array.isArray(record['content'])) return undefined
+  return { content: record['content'] as ContentBlock[], isError: record['isError'] === true }
+}
+
+/**
+ * The result carried by a `tool/result` message, from either log format:
+ * a V4 tool-role message, or a V3 message whose first block wraps it.
+ * @param message - The event's `message`, typed or foreign.
+ * @returns Its result blocks and failure flag; empty when neither shape matches.
+ */
+export function toolResultPayload(message: unknown): ToolResultPayload {
+  if (message === null || typeof message !== 'object') return NO_TOOL_RESULT
+  const record = message as Record<string, unknown>
+  const content = record['content']
+  if (!Array.isArray(content)) return NO_TOOL_RESULT
+  if (record['role'] === 'tool') return { content: content as ContentBlock[], isError: record['isError'] === true }
+  return legacyToolResultBlock(content[0]) ?? NO_TOOL_RESULT
+}
+
+/**
+ * Whether a user message is a compaction checkpoint: V4 `compact-checkpoint`,
+ * or the V3 `{ kind: 'plugin', plugin: 'compact' }` source it replaced.
+ * @param source - A message source, typed or foreign.
+ * @returns True for either checkpoint shape.
+ */
+export function isCompactCheckpointSource(source: unknown): boolean {
+  if (source === null || typeof source !== 'object') return false
+  const record = source as Record<string, unknown>
+  return record['kind'] === 'compact-checkpoint' || (record['kind'] === 'plugin' && record['plugin'] === 'compact')
 }
 
 /**

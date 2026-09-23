@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -36,19 +36,12 @@ function safeExportPath(packageRoot, target, label) {
  * Source checkouts do not contain generated lib/. The production patch
  * deliberately probes package exports with
  * require.resolve(), so the verifier materializes only the declared export
- * target after first checking that its TypeScript source exists. Preset files
- * are copied from the real checkout; no product code is replaced by a mock.
+ * target after first checking that its TypeScript source exists; no product
+ * code is replaced by a mock.
  */
 export function prepareUpstreamSourceResolver(sourceRoot) {
   const tempRoot = mkdtempSync(join(tmpdir(), 'dsh-tui-upstream-resolver-'))
   const scopeRoot = join(tempRoot, 'node_modules', '@deepseek-ai')
-
-  const presetsSource = join(sourceRoot, 'packages/preset/agent-presets')
-  const presetsTarget = join(scopeRoot, 'dsh-agent-presets')
-  copyManifest(join(presetsSource, 'package.json'), presetsTarget, 'dsh-agent-presets')
-  const shippedPresets = join(presetsSource, 'presets')
-  if (!existsSync(shippedPresets)) throw new Error('dsh-agent-presets source has no shipped presets')
-  cpSync(shippedPresets, join(presetsTarget, 'presets'), { recursive: true })
 
   const subagentSource = join(sourceRoot, 'packages/subagent/tool-subagent')
   const subagentTarget = join(scopeRoot, 'dsh-tool-subagent')

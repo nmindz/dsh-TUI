@@ -30,7 +30,8 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
-import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import { createSessionFormatCatalogWithChildren, historicalSessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import { historicalChildCatalogSource } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 // Relative import, not a manifest dependency: a `workspace:*` devDependency
 // would ship verbatim in the npm tarball (this package publishes via npm,
 // which rewrites no workspace protocols) and break `dsh plugin add` in the
@@ -82,14 +83,33 @@ try {
 
     let migrated = 0
     let skipped = 0
+    // The V3→V4 edge needs each parent's historical subagent children as
+    // evidence, so every source is restored to its historical form first.
+    const sources: { stored: Awaited<ReturnType<typeof src.sessionPersistence.inspect>>['meta']; events: readonly unknown[]; header: Record<string, unknown> }[] = []
     for (const meta of metas) {
       if (existing.has(meta.id)) {
         skipped++
         continue
       }
+      const { meta: stored, events } = await src.sessionPersistence.inspect(meta.id)
+      sources.push({ stored, events, header: { type: 'session', ...stored, delegationDepth: stored.delegationDepth ?? 0 } })
+    }
+    const historical = new Map<string, ReturnType<ReturnType<typeof historicalSessionFormatCatalog.createRestore>['finish']>>()
+    for (const source of sources) {
       try {
-        const { meta: stored, events } = await src.sessionPersistence.inspect(meta.id)
-        const restore = sessionFormatCatalog.createRestore({ type: 'session', ...stored, delegationDepth: stored.delegationDepth ?? 0 }, {
+        const restore = historicalSessionFormatCatalog.createRestore(source.header, { recovery: 'strict', validation: 'current' })
+        for (const event of source.events) restore.decodeRow(event)
+        historical.set(String(source.stored.id), restore.finish())
+      } catch {
+        // Reported by the current-format restore below.
+      }
+    }
+    for (const { stored, events, header } of sources) {
+      try {
+        const children = [...historical.values()]
+          .filter(child => child.header.parentSession === stored.id && child.header.origin === 'subagent')
+          .map(child => historicalChildCatalogSource(child))
+        const restore = createSessionFormatCatalogWithChildren(children).createRestore(header, {
           recovery: 'strict', validation: 'current',
         })
         for (const event of events) restore.decodeRow(event)
@@ -115,7 +135,7 @@ try {
         console.log(`  ✓ ${stored.id}  ${events.length} event(s)${stored.cwd ? `  (${stored.cwd})` : ''}`)
       } catch (error) {
         failed++
-        console.warn(`  ✗ ${meta.id}  ${error instanceof Error ? error.message : String(error)}`)
+        console.warn(`  ✗ ${stored.id}  ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     console.log(`done: ${migrated} migrated, ${skipped} skipped (already in target), ${failed} failed`)

@@ -22,6 +22,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   asAssistantChunk,
   deltaText,
+  isCompactCheckpointSource,
   type AssistantChunkEvent,
 } from './upstream-legacy.js'
 
@@ -414,8 +415,8 @@ export function extractEntries(sessionId: string, events: readonly SessionEvent[
 
   /** A user turn, minus goal-sourced and non-user injections. */
   const entryFromUserMessage = (event: Extract<SessionEvent, { type: 'user/message' }>): void => {
-    const source = event.data.source as { kind: string; plugin?: string }
-    if (source.kind === 'plugin' && source.plugin === 'compact') {
+    const source = event.data.source as { kind: string }
+    if (isCompactCheckpointSource(source)) {
       const summary = textOf(event.data.content as readonly Block[])
       push({
         seq: event.seq,

@@ -309,7 +309,7 @@ pnpm dev
 
 `pnpm dev:copy-config` copies only `~/.dsh/settings.yaml` and
 `~/.dsh/.credentials.yaml`. Files are set to mode `0600` on Unix; Windows uses
-the OS-managed file ACL.
+the OS-managed file ACL. `settings.yaml` only exists before a profile's first 0.1.7 boot — 0.1.7 then imports it once and renames it to `settings.yaml.imported`, and configuration moves to each profile's `cordis.patch.yml`.
 
 `pnpm dev` uses isolated `HOME`, `DSH_HOME`, and session directories, leaving
 the normal `~/.dsh/profiles/dsh-tui`, `~/.dsh-tui`, and sessions untouched. The

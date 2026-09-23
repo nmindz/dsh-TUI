@@ -4,7 +4,6 @@
     "dsh-tui-storage-json",
     "dsh-tui-storage-domain",
     "dsh-tui-workspace",
-    "dsh-tui-code-runtime",
     "dsh-tui-subagent-model-selection-settings",
     "dsh-tui-workspaces",
     "dsh-tui-command-trees",
@@ -12,11 +11,16 @@
     "dsh-tui-scenes",
     "dsh-tui-plugin-host",
     "dsh-tui-extensions",
-    "dsh-tui-agent-presets",
+    "dsh-tui-agent-preset-registry",
     "dsh-tui-cordis-host-runner",
     "dsh-tui-auth",
     "dsh-tui",
-    "working-activity"
+    "working-activity",
+    "dsh-tui-preset-standard",
+    "dsh-tui-preset-ptc",
+    "dsh-tui-preset-minimal",
+    "dsh-tui-preset-cordis",
+    "dsh-tui-preset-liangshen"
   ],
   "configOverrides": [
     "system-prompt",
@@ -93,6 +97,11 @@
       "insertsSharedWithWebApp": []
     },
     "0.1.5-rc.1": {
+      "disablesBeyondWebApp": [],
+      "webAppDisablesBeyondTui": [],
+      "insertsSharedWithWebApp": []
+    },
+    "0.1.7-rc.1": {
       "disablesBeyondWebApp": [],
       "webAppDisablesBeyondTui": [],
       "insertsSharedWithWebApp": []

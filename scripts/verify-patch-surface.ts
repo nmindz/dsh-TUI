@@ -12,7 +12,7 @@
  * Run via `node --import tsx/esm scripts/verify-patch-surface.ts`.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate } from '@deepseek-ai/cordis-plugin-loader'
 import { parse as parseYaml } from 'yaml'
@@ -81,6 +81,21 @@ function parsePatch(text: string): ParsedPatch {
   return { overrides, inserts }
 }
 
+/** Every patch file a bundle manifest declares (`dsh.bundle.patch`), parsed and merged in order. */
+function parseBundle(manifestPath: string): ParsedPatch {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh?: { bundle?: { patch?: unknown } } }
+  const declared = manifest.dsh?.bundle?.patch
+  const files = typeof declared === 'string' ? [declared] : declared
+  if (!Array.isArray(files) || files.length === 0) throw new Error(`${manifestPath}: dsh.bundle.patch names no file`)
+  const merged: ParsedPatch = { overrides: [], inserts: [] }
+  for (const file of files as string[]) {
+    const patch = parsePatch(readFileSync(join(dirname(manifestPath), file), 'utf8'))
+    merged.overrides.push(...patch.overrides)
+    merged.inserts.push(...patch.inserts)
+  }
+  return merged
+}
+
 function resolvedPackageFile(specifier: string): string {
   const path = import.meta.resolve(specifier)
   return path.startsWith('file:') ? fileURLToPath(path) : path
@@ -92,7 +107,7 @@ function isMissingModuleError(error: unknown): boolean {
   return code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND'
 }
 
-function baseline(label: string, manifestPath: string, patchPath: string, baseUrl?: string): WebBaseline {
+function baseline(label: string, manifestPath: string, baseUrl?: string): WebBaseline {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { version?: unknown }
   if (typeof manifest.version !== 'string' || manifest.version.length === 0) {
     throw new Error(`${label} web-app manifest has no version`)
@@ -101,7 +116,7 @@ function baseline(label: string, manifestPath: string, patchPath: string, baseUr
     label,
     version: manifest.version,
     baseUrl: baseUrl ?? pathToFileURL(manifestPath).href,
-    patch: parsePatch(readFileSync(patchPath, 'utf8')),
+    patch: parseBundle(manifestPath),
   }
 }
 
@@ -133,7 +148,7 @@ if (!existsSync(tuiPatchPath)) {
   console.error('cordis.patch.yml missing')
   process.exit(1)
 }
-const tui = parsePatch(readFileSync(tuiPatchPath, 'utf8'))
+const tui = parseBundle(join(root, 'package.json'))
 const baselines: WebBaseline[] = []
 
 let installedManifest: string | undefined
@@ -144,20 +159,15 @@ try {
   console.warn('@deepseek-ai/dsh-web-app not installed — skipping installed web-app comparison')
 }
 if (installedManifest !== undefined) {
-  baselines.push(baseline(
-    'installed',
-    installedManifest,
-    resolvedPackageFile('@deepseek-ai/dsh-web-app/cordis.patch.yml'),
-  ))
+  baselines.push(baseline('installed', installedManifest))
 }
 
 const sourceRoot = resolve(process.env.DSH_HARNESS_SOURCE_ROOT ?? resolve(root, '../deepseek-harness'))
 const sourceManifest = join(sourceRoot, 'packages/bundle/web-app/package.json')
-const sourcePatch = join(sourceRoot, 'packages/bundle/web-app/cordis.patch.yml')
 const requireSourceBaseline = process.env.DSH_REQUIRE_ALPHA_BASELINE === '1'
-if (existsSync(sourceManifest) && existsSync(sourcePatch)) {
+if (existsSync(sourceManifest)) {
   const resolver = prepareUpstreamSourceResolver(sourceRoot)
-  const source = baseline('source', sourceManifest, sourcePatch, resolver.baseUrl)
+  const source = baseline('source', sourceManifest, resolver.baseUrl)
   // Derived from the contract, never a second literal: the required baseline
   // IS the primary validated line, and a hardcoded copy silently disagrees
   // with `contract.ts` the moment that line moves.

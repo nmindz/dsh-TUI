@@ -9,6 +9,7 @@ import { createContextBookkeeping } from './channel/context-bookkeeping.js'
 import { createChannelActionMethods, createChannelActionReadiness, type ChannelActionDelegates } from './channel/action-readiness.js'
 import { createBindingEvents } from './channel/binding-events.js'
 import { createInitialChannelView, type ChannelLaunchOptions } from './channel/state.js'
+import { hostCommandShell } from './host-shell.js'
 import { createChannelProjection } from './channel/projection.js'
 import { createManualCompaction } from './channel/compaction.js'
 import { createSessionAdoption } from './channel/session-adoption.js'
@@ -678,10 +679,7 @@ function createChannelWithOwner(
       })
     }
   }
-  const bash = ctx.get('shell') as {
-    resolve(request: { command: string; workdir?: string; timeoutMs: number }): { command: string; timeoutMs: number }
-    run(spec: { command: string; timeoutMs: number }): Promise<{ stdout: { text: string }; stderr: { text: string }; timedOut: boolean }>
-  } | undefined
+  const bash = hostCommandShell(ctx.get('shell'))
 
   const projector = createChannelProjection(state, {
     agent: () => binding.agent, rowIds, resetContextWarning, pendingTaskDescriptions, jobs: jobStore, inputConvergence,

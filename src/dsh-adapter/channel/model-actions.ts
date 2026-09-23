@@ -255,8 +255,8 @@ export function createModelActions(
     // The RESOLVED section, not the user layer: a route inherited from a
     // composition base is configured and usable even though `/provider`
     // cannot edit it.
-    const section = (ctx.get('settings') as { get(ns: string): unknown } | undefined)
-      ?.get('llm-pi-ai') as { providers?: Record<string, unknown> } | undefined
+    const section = (ctx.get('settings') as { describe(): readonly { ns: string; value?: unknown }[] } | undefined)
+      ?.describe().find(row => row.ns === 'llm-pi-ai')?.value as { providers?: Record<string, unknown> } | undefined
     const configured = section?.providers
     const known = configured !== null && typeof configured === 'object' ? configured : undefined
     return Promise.resolve(llmRuntime.listProviders().map(info => ({

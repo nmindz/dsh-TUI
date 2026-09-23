@@ -6,7 +6,7 @@
  * resolve a plain `.ts` module.
  * @module @deepseek-harness-tui/dsh-tui
  */
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SessionModeSpec } from '../sessionModes.js'
 import { DEFAULT_STATUS_BAR, normalizePageMargin, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
@@ -138,6 +138,20 @@ export interface Config {
    *  defaults; the `/settings` screen edits the same keys live (its user
    *  layer wins over this file). */
   shortcuts?: Partial<Record<ShortcutActionId, string>>
+  /** Header pixel whale art (settings `dsh-tui.whale`); on by default. */
+  whale?: boolean
+  /** Idle whale behaviors after the intro settles (settings
+   *  `dsh-tui.whaleIdle`); on by default, off keeps the header timer-free. */
+  whaleIdle?: boolean
+  /** Minimal mode (settings `dsh-tui.minimal`): strips the header splash,
+   *  emoji glyphs, and decorative colors; code highlight and tool colors stay. */
+  minimal?: boolean
+  /** Default reasoning effort for new sessions (settings
+   *  `dsh-tui.effortDefault`); unset or `auto` keeps the boot chain decisive. */
+  effortDefault?: string
+  /** Auto-summarize the session tail when a session opens (settings
+   *  `dsh-tui.recapOnOpen`); on by default. */
+  recapOnOpen?: boolean
   /** Shift+Tab session-mode cycle (array order IS the cycle order; index 0
    *  is the unmarked base mode). Each entry bundles any subset of the
    *  `plan`/`sandbox`/`approval` atoms; absent → the built-in
@@ -145,7 +159,32 @@ export interface Config {
   modes?: SessionModeSpec[]
 }
 
-export const Config: Schema<Config> = Schema.object({
+/**
+ * Fields the `/settings` screen edits live. They are `volatile`: the settings
+ * service writes an edit into the profile patch and the Loader updates the
+ * reference in place, because remounting this plugin would tear the TUI down.
+ * The profile layer sitting over the bundle patch is the old user-over-
+ * cordis.yml precedence.
+ */
+export const LIVE_SETTING_KEYS = [
+  'diffLayout', 'thinkingFold', 'toolBackground', 'scrollGutter', 'pageMargin',
+  'foldTerminalCommand', 'promptSessionLabel', 'expandEditor', 'smoothStreaming',
+  'mermaidDiagrams', 'statusBar', 'shortcuts', 'fullscreen', 'terminalImages', 'lang',
+  'whale', 'whaleIdle', 'minimal', 'effortDefault', 'recapOnOpen',
+] as const satisfies readonly (keyof Config)[]
+
+/** One live setting's name. */
+export type LiveSettingKey = (typeof LIVE_SETTING_KEYS)[number]
+
+/** A plain snapshot of the live settings. */
+export type LiveSettings = Pick<Config, LiveSettingKey>
+
+/** The parsed configuration `apply` receives: live settings arrive as references. */
+export type ResolvedConfig = Omit<Config, LiveSettingKey> & {
+  readonly [K in LiveSettingKey]: Volatile<Config[K] | undefined>
+}
+
+export const Config: Schema<Config, ResolvedConfig> = Schema.object({
   sessionId: Schema.string().required(false),
   // No schema defaults on the route: a `.default()` here would make an
   // unset key indistinguishable from an explicit cordis.yml choice and the
@@ -159,26 +198,31 @@ export const Config: Schema<Config> = Schema.object({
   activity: Schema.boolean().default(true),
   activityFrames: Schema.string().required(false),
   contextBar: Schema.boolean().default(true),
-  fullscreen: Schema.boolean().default(true),
-  terminalImages: Schema.boolean().default(true),
-  lang: Schema.string().required(false),
+  fullscreen: Schema.boolean().default(true).volatile(),
+  terminalImages: Schema.boolean().default(true).volatile(),
+  lang: Schema.string().required(false).volatile(),
   preset: Schema.string().required(false),
-  diffLayout: Schema.union(['auto', 'split', 'unified']).default('auto'),
-  thinkingFold: Schema.union(['preview', 'full']).default('preview'),
-  toolBackground: Schema.union(['none', 'subtle', 'strong']).default('none'),
-  scrollGutter: Schema.union(['timeline', 'scrollbar', 'hidden']).default('timeline'),
+  diffLayout: Schema.union(['auto', 'split', 'unified']).default('auto').volatile(),
+  thinkingFold: Schema.union(['preview', 'full']).default('preview').volatile(),
+  toolBackground: Schema.union(['none', 'subtle', 'strong']).default('none').volatile(),
+  scrollGutter: Schema.union(['timeline', 'scrollbar', 'hidden']).default('timeline').volatile(),
   // Preset names AND custom `NxM` specs must survive validation (a custom
   // spec is not a fixed union member); junk is normalized to `normal` by
   // the transform, so every parsed config carries a valid setting.
   pageMargin: Schema.transform(
     Schema.string().default('normal'),
     value => normalizePageMargin(value),
-  ),
-  foldTerminalCommand: Schema.boolean().default(false),
-  promptSessionLabel: Schema.boolean().default(false),
-  expandEditor: Schema.boolean().default(true),
-  smoothStreaming: Schema.boolean().default(true),
-  mermaidDiagrams: Schema.boolean().default(true),
+  ).volatile(),
+  foldTerminalCommand: Schema.boolean().default(false).volatile(),
+  promptSessionLabel: Schema.boolean().default(false).volatile(),
+  expandEditor: Schema.boolean().default(true).volatile(),
+  smoothStreaming: Schema.boolean().default(true).volatile(),
+  mermaidDiagrams: Schema.boolean().default(true).volatile(),
+  whale: Schema.boolean().default(true).volatile(),
+  whaleIdle: Schema.boolean().default(true).volatile(),
+  minimal: Schema.boolean().default(false).volatile(),
+  effortDefault: Schema.string().required(false).volatile(),
+  recapOnOpen: Schema.boolean().default(true).volatile(),
   statusBar: Schema.object({
     compact: Schema.boolean().default(DEFAULT_STATUS_BAR.compact),
     model: Schema.boolean().default(DEFAULT_STATUS_BAR.model),
@@ -202,12 +246,12 @@ export const Config: Schema<Config> = Schema.object({
     // Explicit footer arrangement. Set, it overrides every field switch
     // above; `|` splits the left group from the right-aligned one.
     layout: Schema.array(Schema.string()).default([]),
-  }).default({ ...DEFAULT_STATUS_BAR, layout: [] }),
+  }).default({ ...DEFAULT_STATUS_BAR, layout: [] }).volatile(),
   // One optional combo string per customizable action (no defaults: unset
   // keeps the built-in binding; see Config.shortcuts).
   shortcuts: Schema.object(
     Object.fromEntries(SHORTCUT_ACTIONS.map(action => [action.id, Schema.string().required(false)])),
-  ).required(false),
+  ).required(false).volatile(),
   modes: Schema.array(
     Schema.object({
       id: Schema.string(),
@@ -227,7 +271,7 @@ export const Config: Schema<Config> = Schema.object({
  * @param config - the validated dsh-tui configuration.
  * @returns a promise settling when the TUI teardown completes.
  */
-export async function apply(ctx: Context, config: Config): Promise<void> {
+export async function apply(ctx: Context, config: ResolvedConfig): Promise<void> {
   // Upstream drift is NO LONGER spammed to stderr here: per-package
   // console.warn lines interleave with the TUI frame redraw and arrive
   // garbled (typewriter animation repaints over them). The merged,

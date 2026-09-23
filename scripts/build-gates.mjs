@@ -86,5 +86,6 @@ export const BUILD_GATES = [
   'verify:session-mounts',
   'verify:status-footer',
   'verify:turn-error-replay',
+  'verify:session-v4-replay',
   'verify:status-segment-ledger',
 ]

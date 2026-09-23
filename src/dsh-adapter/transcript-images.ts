@@ -1,5 +1,6 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { TranscriptImage } from '../adapter/ports/channel-view.js'
+import { legacyToolResultBlock } from './upstream-legacy.js'
 
 type ImageBlock = Extract<ContentBlock, { type: 'image' }>
 type ImageAttachment = ImageBlock['attachment']
@@ -45,8 +46,9 @@ export function transcriptImagesOf(
     if (!Array.isArray(blocks)) return
     for (const block of blocks) {
       if (typeof block !== 'object' || block === null) continue
-      if (block.type === 'tool-result') {
-        visit(block.content)
+      const wrapped = legacyToolResultBlock(block)
+      if (wrapped !== undefined) {
+        visit(wrapped.content)
         continue
       }
       if (block.type !== 'image') continue

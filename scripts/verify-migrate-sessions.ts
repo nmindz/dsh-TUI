@@ -68,7 +68,7 @@ try {
     for (const id of ['source', 'fork']) {
       const handle = await dst.sessionPersistence.open(SessionId(id), 'read')
       try {
-        assert.equal(handle.header.version, 3)
+        assert.equal(handle.header.version, 4)
         assert.equal(handle.header.agentPreset, 'liangshen')
         const { events, eventState } = await handle.read()
         const restored = Session.fromRestore(handle.id, events, handle.header, handle.inheritedEventCount, eventState)

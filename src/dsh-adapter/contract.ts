@@ -1,14 +1,24 @@
 /**
  * Upstream compatibility contract.
  *
- * The TUI is validated against a set of upstream prerelease lines — the
- * current primary (0.1.5-rc.1) plus older lines kept in backward
- * compatibility across the 0.1.5, 0.1.3, 0.1.2, 0.1.1 and 0.1.0 release
- * families.
+ * The TUI is validated against one upstream prerelease line, 0.1.7-rc.1.
+ * That line replaced directory presets with declared preset rows, the
+ * settings namespaces with volatile Config forms, and Session V3 with V4, so
+ * no earlier line is kept.
  * Every official package this adapter touches is blessed here; anything
  * else must go through upstream channels or the adapter, never the UI.
  *
- * What the 0.1.5 line changed, and where the adapter absorbs it:
+ * What the 0.1.7 line changed, and where the adapter absorbs it:
+ *  - Agent presets are `@deepseek-ai/dsh-agent-preset` rows registered with
+ *    `dsh-agent-preset-registry`; the bundle ships its own declarations
+ *    (presets/*.patch.yml) because only the web-app bundle carries them.
+ *  - Settings are each plugin's volatile Config fields, edited through the
+ *    profile patch (live-settings.ts); `settings.register/get/watch` are gone.
+ *  - Session V4 made tool results `role: 'tool'` messages and retired the
+ *    `plugin` message source; V3 logs are read through upstream-legacy.
+ *  - The host shell runs through `execute(spec)` (host-shell.ts).
+ *
+ * What the 0.1.5 line changed, still absorbed for older session logs:
  *  - Session artifacts are generation-tagged (`session.vN.jsonl.zstd`);
  *    `locate()` reports only the CURRENT generation, so an older-generation
  *    log needs resolving inside its own directory (compat/sessionLog).
@@ -28,37 +38,16 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 /** Primary validated upstream line (newest). */
-export const UPSTREAM_VALIDATED_VERSION = '0.1.5-rc.1'
+export const UPSTREAM_VALIDATED_VERSION = '0.1.7-rc.1'
 
 /**
  * Explicitly supported upstream prerelease lines, oldest first.
  *
- * 0.1.5-rc.1 = primary continuous-CI line; 0.1.5-alpha.2/alpha.1 = mapped
- * compatibility lines (source-checked when the primary line moves);
- * 0.1.3-alpha.2 = compatibility line (the only 0.1.3 build on npm);
- * 0.1.2-rc.1 = previous family (full CI coverage); 0.1.2-alpha.3–alpha.5 =
- * mapped compatibility lines; 0.1.1-rc.1/rc.2 = compatibility lines
- * (install- and type-level compatibility); 0.1.0-rc.7/rc.8 = full CI
- * coverage; 0.1.0-rc.6 = legacy line (install- and type-level
- * compatibility, feature surface may lack later additions — new features
- * must degrade gracefully there).
  * The peer range in package.json is deliberately wider than this list: an
- * install on an older or newer line is allowed but reports drift at boot.
+ * install on a newer line is allowed but reports drift at boot.
  */
 export const UPSTREAM_VALIDATED_VERSIONS = [
-  '0.1.0-rc.6',
-  '0.1.0-rc.7',
-  '0.1.0-rc.8',
-  '0.1.1-rc.1',
-  '0.1.1-rc.2',
-  '0.1.2-alpha.3',
-  '0.1.2-alpha.4',
-  '0.1.2-alpha.5',
-  '0.1.2-rc.1',
-  '0.1.3-alpha.2',
-  '0.1.5-alpha.1',
-  '0.1.5-alpha.2',
-  '0.1.5-rc.1',
+  '0.1.7-rc.1',
 ] as const
 
 /**
@@ -77,9 +66,9 @@ export const UPSTREAM_BLESSED_PACKAGES = [
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-instructions',
-  '@deepseek-ai/dsh-agent-presets',
+  '@deepseek-ai/dsh-agent-preset',
+  '@deepseek-ai/dsh-agent-preset-registry',
   '@deepseek-ai/dsh-atomic-write',
-  '@deepseek-ai/dsh-code-runtime-worker-thread',
   '@deepseek-ai/dsh-commands',
   '@deepseek-ai/dsh-cordis-host-runner',
   '@deepseek-ai/dsh-llm',

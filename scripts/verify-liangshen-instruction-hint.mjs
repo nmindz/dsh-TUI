@@ -104,7 +104,7 @@ assert.deepEqual(unrelated.warnings, [])
 assert.deepEqual(reentry.warnings, [])
 
 const modernSession = Session.create(SessionId('hint-v3'), [], {
-  id: SessionId('hint-v3'), version: 3, isSeeded: false, createdAt: 1, cwd: '/workspace/project',
+  id: SessionId('hint-v3'), version: 4, isSeeded: false, createdAt: 1, cwd: '/workspace/project',
 })
 modernSession.append('tool/call', { turn: 1, step: 1, callId: 'call', name: 'bash', arguments: '{}' })
 const modern = createHarness()

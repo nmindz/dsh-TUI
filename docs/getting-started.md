@@ -301,7 +301,7 @@ pnpm dev
 
 `pnpm dev:copy-config` 只复制 `~/.dsh/settings.yaml` 与
 `~/.dsh/.credentials.yaml`。Unix 上文件权限设为 `0600`；Windows 使用系统管理的
-文件 ACL。
+文件 ACL。`settings.yaml` 只在 profile 首次 0.1.7 启动前存在，之后 0.1.7 会把它一次性导入并改名为 `settings.yaml.imported`，配置改落在各 profile 的 `cordis.patch.yml`。
 
 `pnpm dev` 使用独立的 `HOME`、`DSH_HOME` 和会话目录，不覆盖正式
 `~/.dsh/profiles/dsh-tui`、`~/.dsh-tui` 或正式会话。默认测试目录：

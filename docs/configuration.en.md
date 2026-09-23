@@ -26,6 +26,8 @@ only for a genuinely new service.
 > When a row is overridden, its `config` block is replaced as a whole. It is
 > not deep-merged, so repeat every key that must remain active.
 
+> On first boot, 0.1.7 imports the legacy `~/.dsh/settings.yaml` once into whichever profile boots first (and renames that file to `settings.yaml.imported`). With several profiles installed (e.g. `web` and `tui`), the ones that boot later miss the shared sections (providers under `llm-pi-ai`, `agent-default-model`, `permission`) and need those rows copied into their own `cordis.patch.yml`.
+
 ## TUI configuration
 
 A complete common override looks like this:
@@ -56,7 +58,7 @@ A complete common override looks like this:
 | `model` | Harness `agentDefaultModel`; bare compositions fall back to `deepseek-flash` | Startup model; `/model` can switch through a session fork |
 | `cwd` | git worktree root containing the launch directory (`process.cwd()` when outside any worktree; a dotfiles repo at `$HOME` does not count) | TUI-side session workspace: agent meta, `@` completion/mention expansion, /resume filtering, statusline; resuming an existing session adopts that session's persisted cwd. Note the bash/fs-policy/sandbox roots are still owned by the composition layer's cordis config (default: the launch directory, governed by dsh-base) and may differ from this session-side cwd |
 | `workspace` | unset | Startup workspace target: a local path, `file://` URL, or plugin-provided URI; takes precedence over `cwd` |
-| `effort` | normally `max` in the bundle | Reasoning effort applied to every request (validated against the runtime model's levels; invalid levels silently fall back to the adapter default), also shown in the header at startup. Precedence: /settings default reasoning effort `effortDefault` (settings.yaml user layer; `auto` defers) > this field > the persisted `/effort` choice (`~/.dsh-tui/effort.json`) > the model default |
+| `effort` | normally `max` in the bundle | Reasoning effort applied to every request (validated against the runtime model's levels; invalid levels silently fall back to the adapter default), also shown in the header at startup. Precedence: /settings default reasoning effort `effortDefault` (the `dsh-tui` row in the profile's `cordis.patch.yml`, user layer; `auto` defers) > this field > the persisted `/effort` choice (`~/.dsh-tui/effort.json`) > the model default |
 | `modes` | built-in trio | Shift+Tab session-mode cycle (plan/sandbox/approval atom bundles); defaults to default → plan → full-access |
 | `activity` | `true` | Show the live activity row |
 | `activityFrames` | `moon8` | Activity animation preset; `/activity` changes it at runtime. A legacy saved value of `claude` is read as `moon8`, and the picker no longer offers that legacy preset |
@@ -172,7 +174,9 @@ Do not insert a second row and do not separately run
 ## Agent presets
 
 Each session composes its model-visible tools and prompt through
-`@deepseek-ai/dsh-agent-presets`:
+`@deepseek-ai/dsh-agent-preset` rows, registered with `@deepseek-ai/dsh-agent-preset-registry`; no directory is scanned.
+
+The built-in `standard`/`ptc`/`minimal`/`cordis` rows are generated from the official `@deepseek-ai/dsh-web-app` by `scripts/sync-web-presets.mjs`; `liangshen` ships with this package. Each is declared as its own `presets/<id>.patch.yml` row and disables itself when the matching official `preset-<id>` row is already enabled, so a profile mounting both the web app and dsh-tui does not register the same preset twice.
 
 | ID | Name | Capability |
 | --- | --- | --- |
@@ -224,9 +228,7 @@ Each session composes its model-visible tools and prompt through
 
 ### Custom presets
 
-Place a custom preset at `$DSH_HOME/.agent-presets/<name>/` with an
-`agent.cordis.yml` file. Under the default DSH home this is
-`~/.dsh/.agent-presets/`.
+`$DSH_HOME/.agent-presets/` is no longer scanned. A custom preset is now a `@deepseek-ai/dsh-agent-preset` row (`config: { id, name, description, order, plugins: [...] }`) inserted into the profile's `cordis.patch.yml`; see this package's own `presets/standard.patch.yml` for the row shape.
 
 Since 0.3, model-side tools, planning, compaction, and delegation are owned by
 the preset. Profile mode no longer uses the old `DSH_TUI_COMPACT_RATIO`,
@@ -317,13 +319,13 @@ providers without a restart.
 - Only non-environment keys are written to the store; a key shared with
   another provider is kept on delete.
 
-**Route claims and collisions**: dsh-auth claims the `openai-codex`, `anthropic` and `xai` llm routes by default, signed in or not. The llm registry is first-come and both adapter families register asynchronously, so a same-named route configured under `llm-pi-ai:` in settings.yaml can lose the claim — the loser only reports it in the harness log. A dsh-auth route that is not signed in lists an empty catalog, so `/model` shows that provider as unavailable rather than hiding it. To let the `llm-pi-ai` route serve, drop the conflicting route with `DSH_TUI_OAUTH_PROVIDERS` (e.g. `DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`); dsh-auth refuses an empty list, so disable the whole row (`disabled: true`) in the profile patch when no subscription sign-in is wanted.
+**Route claims and collisions**: dsh-auth claims the `openai-codex`, `anthropic` and `xai` llm routes by default, signed in or not. The llm registry is first-come and both adapter families register asynchronously, so a same-named route configured under the `llm-pi-ai` row's `config.providers` in the profile's `cordis.patch.yml` can lose the claim — the loser only reports it in the harness log. A dsh-auth route that is not signed in lists an empty catalog, so `/model` shows that provider as unavailable rather than hiding it. To let the `llm-pi-ai` route serve, drop the conflicting route with `DSH_TUI_OAUTH_PROVIDERS` (e.g. `DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`); dsh-auth refuses an empty list, so disable the whole row (`disabled: true`) in the profile patch when no subscription sign-in is wanted.
 
 Where it writes:
 
 | Artifact | Location |
 | --- | --- |
-| Provider profile | `llm-pi-ai.providers.<route>` in `~/.dsh/settings.yaml`; the route registers on write and unregisters on delete |
+| Provider profile | `llm-pi-ai` row's `config.providers.<route>` in the profile's `cordis.patch.yml`; the route registers on write and unregisters on delete |
 | API key | `~/.dsh/.credentials.yaml` (mode 0600), referenced as `<ROUTE>_API_KEY` |
 
 With the bundled dsh-auth plugin mounted, the add branch also offers

@@ -42,9 +42,7 @@ if (missing.length > 0) {
   throw new Error(`package exports missing from tarball: ${missing.join(', ')}`)
 }
 for (const presetFile of [
-  'presets/liangshen/agent.cordis.yml',
-  'presets/liangshen/preset.yml',
-  'presets/liangshen/.dsh-tui-managed.json',
+  ...manifest.dsh.bundle.patch.map(file => file.replace(/^\.\//u, '')),
   'presets/liangshen/tool-bootstrap.mjs',
 ]) {
   if (!packed.has(presetFile)) throw new Error(`packaged preset file missing from tarball: ${presetFile}`)

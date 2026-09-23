@@ -30,7 +30,7 @@ dsh-tui
 - `dsh-tui safe`: safe mode — read-only environment view, lists profile plugins, suggests fixes, and can create a clean rescue profile (see §5.5).
 - `dsh --profile dsh-tui`: manual launch, equivalent to `dsh-tui` (`/update` only works this way).
 - Running a model needs `DEEPSEEK_API_KEY`. Run `/doctor` to check the environment.
-- Verified dsh engine version: `0.1.5-rc.1`. Older or newer versions still start, but the logo page shows a version-drift note and the command to align.
+- Verified dsh engine version: `0.1.7-rc.1`, and it is the floor — no earlier line is supported (peer range `^0.1.7-rc.1`). On a mismatched install the logo page still shows a version-drift note and the command to align.
 - If the logo page shows a ⚠ version-drift warning, align the dsh engine:
   `npm i -g @deepseek-ai/dsh@<版本>`
 
@@ -270,7 +270,7 @@ The command menu = built-in commands (50) + DSH registry commands (`/plan` `/goa
 | `/preset` | `<id>` / `status` | agent preset: `standard` / `ptc` (old 0.1.1 name `code`) / `minimal` / `cordis` / **Liangshen mode `liangshen`**; **cannot switch an already-started session**. Persisted to `~/.dsh-tui/agent-preset.json` |
 | `/theme` | `<名字>` / `status` | theme: no-arg selector; `<名字>` switch directly; `status` current theme (auto appends the OSC 11 result). Persisted to `~/.dsh-tui/theme.json` |
 | `/color` | no-arg / `<名>` / `status` / `reset` | session accent color: no-arg opens the palette (`↑/↓` pick, `Enter` apply); `<名>` set directly; `reset` back to default. Colors `red/orange/yellow/green/blue/purple/pink/cyan`, saved per session |
-| `/lang` | `en` / `zh` / `status` | hot-switch UI language. Priority: `DSH_TUI_LANG` > settings.yaml > cordis.yml > persisted |
+| `/lang` | `en` / `zh` / `status` | hot-switch UI language. Priority: `DSH_TUI_LANG` > the `dsh-tui` row in the profile's `cordis.patch.yml` (where `/settings` writes) > cordis.yml > persisted |
 | `/vim` | none | **vim editing mode toggle** (see §2.4): input switches to vim keys, per-session, not persisted |
 
 ### 3.4 Account / policy / extensions
@@ -469,7 +469,7 @@ Example: `model, ctx, |, my-plugin:tf, git, cwd`
 ### 5.3 The /settings editor
 
 `/settings` opens the plugin settings editor; **changes save automatically**, `Esc` exits directly.
-The dsh-tui block writes to the settings.yaml user layer; most settings apply live; fullscreen and image-preview need `/restart`.
+The dsh-tui block writes to the booted profile's `cordis.patch.yml` (the user layer, `dsh-tui` row); most settings apply live; fullscreen and image-preview need `/restart`.
 Common items below, full list on the /settings screen:
 
 | Field | Notes |
@@ -498,7 +498,7 @@ last `/effort` (effort.json) > model default.
 
 **pageMargin**: custom `NxM` = `N` columns left/right, `M` rows top/bottom (cap 8x4); only `N` means 1 row top/bottom.
 
-Namespaces not declared as TUI blocks are listed read-only, edit `~/.dsh/settings.yaml` by hand.
+Namespaces not declared as TUI blocks are listed read-only, edit that profile's `cordis.patch.yml` by hand.
 These settings are **not in /settings**, edit `$DSH_HOME/profiles/dsh-tui/cordis.patch.yml`:
 provider / model / cwd / preset / workspace / sessionId / modes,
 plus the startup-level `effort` key.
@@ -540,7 +540,7 @@ When dsh exits unexpectedly, safe mode gives a **read-only** environment diagnos
 | Agent preset | `/preset` | `standard` / `ptc` (old 0.1.1 name `code`) / `minimal` / `cordis` / **Liangshen mode `liangshen`**; **can't switch an already-started session** |
 | Theme | `/theme` | `auto` (OSC 11 follows terminal background) / `light` / `dark` / `dark-ansi`; `/theme <名>` direct; `/theme status` for the result |
 | Custom theme | manual | `~/.dsh-tui/themes/<名>.json`, `{base, colors}` format, hot-swap on select; naming it `auto` gets shadowed by the built-in |
-| Language | `/lang` | `en` / `zh` hot switch; priority `DSH_TUI_LANG` > settings.yaml > cordis.yml > persisted |
+| Language | `/lang` | `en` / `zh` hot switch; priority `DSH_TUI_LANG` > the `dsh-tui` row in the profile's `cordis.patch.yml` > cordis.yml > persisted |
 | Status animation | `/activity` | selector or `/activity frames <名>`; default `moon8`, `random` randomizes |
 
 **Theme priority**: `DSH_TUI_THEME` > `~/.dsh-tui/theme.json` > OSC 11 terminal-background detection > dark fallback.

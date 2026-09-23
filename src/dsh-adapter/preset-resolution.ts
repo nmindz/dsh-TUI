@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 /** One roster entry, as returned by `agentPresets.list()`/`resolve()`. */
 export interface AgentPresetInfo {
   readonly id: string
-  readonly trust: 'system' | 'user'
+  readonly trust?: 'system' | 'user'
   readonly name?: string
   readonly description?: string
   /** Present when the preset cannot compose a session (human-readable). */

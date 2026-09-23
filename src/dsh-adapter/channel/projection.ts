@@ -11,7 +11,7 @@ import { isSubagentToolName, parseJobOutputId, toolCommandOf, BACKGROUND_START_A
 import { ARGS_PREVIEW_LIMIT, harnessToolResultView, LOCAL_OUTPUT_LIMIT, prepareReplayEvents, preview, RESULT_PREVIEW_LIMIT, toolErrorText } from './transcript.js'
 import { estimateTokens, isTokenDelta, tokenDeltaChars, usageOutputTokens } from './usage.js'
 import { transcriptImagesOf, type TranscriptImage } from '../transcript-images.js'
-import { eventType, legacyHeaderSystem } from '../upstream-legacy.js'
+import { eventType, isCompactCheckpointSource, legacyHeaderSystem, toolResultPayload } from '../upstream-legacy.js'
 import { isPeakHour } from '../../deepseekPricing.js'
 import { t } from '../../i18n.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -181,12 +181,10 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
       if (local !== undefined) return local
       const tool = toolsRegistry?.get(name, deps.agent())
       if (tool?.presentResult === undefined) return undefined
-      const block = data.message.content[0]
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable session data may not match type
-      const content = block !== undefined && block.type === 'tool-result' ? block.content : []
+      const { content, isError } = toolResultPayload(data.message)
       return tool.presentResult(JSON.parse(rawArgs), {
-        content,
-        isError: block?.isError === true,
+        content: [...content],
+        isError,
         ...(data.meta !== undefined ? { meta: data.meta } : {}),
       }) as ToolResultView | undefined
     } catch {
@@ -489,15 +487,11 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     }
     switch (event.type) {
       case 'user/message': {
-        // Compaction checkpoint: `source = { kind: 'plugin', plugin:
-        // 'compact' }` (dsh-compact's COMPACT_CHECKPOINT_SOURCE). Render the
+        // Compaction checkpoint (see isCompactCheckpointSource). Render the
         // framed summary after /compact as a Divider title + a summary row
         // that defaults folded (`compact` kind) instead of skipping it like
         // other injected context.
-        if (
-          event.data.source.kind === 'plugin' &&
-          event.data.source.plugin === 'compact'
-        ) {
+        if (isCompactCheckpointSource(event.data.source)) {
           const summary = textOf(event.data.content)
           appendRow({ id: deps.rowIds.value, kind: 'notice', text: 'Session summary is ready' })
           deps.rowIds.value += 1
@@ -822,9 +816,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
             state.contextSegments.tools += estimateTokens(errorText)
           } else {
             card.tool.status = 'ok'
-            const block = event.data.message.content[0]
-            // oxlint-disable-next-line typescript/no-unnecessary-condition -- durable session data may not match type
-            const result = block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
+            const result = textOf(toolResultPayload(event.data.message).content)
             card.tool.resultFull = result || undefined
             card.tool.resultText = result ? preview(result, RESULT_PREVIEW_LIMIT) : undefined
             // The tool's own settled-state view (applied diff, terminal

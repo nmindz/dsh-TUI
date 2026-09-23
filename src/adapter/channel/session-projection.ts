@@ -76,6 +76,8 @@ export const KNOWN_DSH_EVENT_TYPES = new Set<string>([
   'assistant/attempt',
   // 0.1.5: the system prompt became a surface node.
   'system/message',
+  // 0.1.7 (Session V4): incremental tool additions/removals in conversation order.
+  'developer/message',
   'tool/call',
   'tool/result',
   'command/run',
@@ -87,6 +89,8 @@ export const KNOWN_DSH_EVENT_TYPES = new Set<string>([
   'request/header',
   'request/context',
   'session/end-seed',
+  // 0.1.7: an attachment moved out of the request surface.
+  'image/offload',
   // Not an appendable session event: 0.1.5 declares it in the same types file
   // as a RemoteErrorDetailsMap key (SessionId resolution failure). Recognized
   // here so the conformance sweep over that file stays total; it folds to no

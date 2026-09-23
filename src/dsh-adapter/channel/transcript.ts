@@ -1,7 +1,7 @@
 import { type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ChatRow, ToolResultView, ToolViewPresenter } from './types.js'
 import { markChannelReadDirty } from '../../adapter/channel/read-view.js'
-import { ASSISTANT_CHUNK_TYPE, eventType } from '../upstream-legacy.js'
+import { ASSISTANT_CHUNK_TYPE, eventType, toolResultPayload } from '../upstream-legacy.js'
 
 export const ARGS_PREVIEW_LIMIT = 160
 
@@ -171,9 +171,7 @@ export function restoreRowFromEvent(row: ChatRow, event: SessionEvent): void {
 
 /** Render the durable tool-result payload, including provider error details. */
 export function toolResultText(event: SessionEvent<'tool/result'>): string {
-  const block = event.data.message.content[0]
-  if (block === undefined || block.type !== 'tool-result') return ''
-  return block.content.map(item => item.type === 'text' ? item.text : '').join('').trim()
+  return toolResultPayload(event.data.message).content.map(item => item.type === 'text' ? item.text : '').join('').trim()
 }
 
 /** Phase badge for the harness goal card — mirrors the panel's PhaseBadge. */
@@ -199,9 +197,7 @@ export function harnessToolResultView(
   const isGoalTool = lower.includes('goal')
   const isTodoTool = lower.includes('todo')
   if (!isGoalTool && !isTodoTool) return undefined
-  const block = data.message.content[0]
-  if (block === undefined || block.type !== 'tool-result') return undefined
-  const text = block.content.map(item => item.type === 'text' ? item.text : '').join('').trim()
+  const text = toolResultPayload(data.message).content.map(item => item.type === 'text' ? item.text : '').join('').trim()
   if (text === '' || !text.startsWith('{')) return undefined
   let parsed: unknown
   try {

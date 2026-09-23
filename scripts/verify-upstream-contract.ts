@@ -36,7 +36,7 @@ assert.deepEqual(crossMinorAlpha, [0, 1, 5, 'alpha', 1])
 assert.ok(compareVersions(crossMinorAlpha, rc) > 0)
 assert.ok(compareVersions(crossMinorAlpha, parseUpstreamVersion('0.1.5-alpha.2')!) < 0)
 assert.ok(compareVersions(crossMinorAlpha, parseUpstreamVersion('0.1.5-rc.1')!) < 0)
-assert.match(UPSTREAM_VALIDATED_LABEL, /^0\.1\.5-rc\.1/u)
+assert.match(UPSTREAM_VALIDATED_LABEL, /^0\.1\.7-rc\.1/u)
 // The primary line must itself be a validated line. Without this, dropping
 // the primary from UPSTREAM_VALIDATED_VERSIONS still passes the prefix match
 // and upstreamDrift() (which inspects the INSTALLED versions, not the
@@ -52,14 +52,14 @@ const mixedVersions = Object.fromEntries(UPSTREAM_BLESSED_PACKAGES.map(packageNa
     ? '4.0.1'
     : UPSTREAM_FRAMEWORK_MAJORS[packageName] === 3
       ? '3.18.1'
-      : '0.1.1-rc.2',
+      : UPSTREAM_VALIDATED_VERSION,
 ]))
-mixedVersions['@deepseek-ai/dsh-agent'] = '0.1.2-rc.1'
-assert.deepEqual(installedUpstreamLines(mixedVersions), ['0.1.1-rc.2', '0.1.2-rc.1'])
-assert.deepEqual(upstreamDrift(mixedVersions), [])
+mixedVersions['@deepseek-ai/dsh-agent'] = '0.1.8-rc.1'
+assert.deepEqual(installedUpstreamLines(mixedVersions), [UPSTREAM_VALIDATED_VERSION, '0.1.8-rc.1'])
+assert.deepEqual(upstreamDrift(mixedVersions).map(entry => entry.package), ['@deepseek-ai/dsh-agent'])
 assert.deepEqual(upstreamDriftSummary(mixedVersions), {
   kind: 'mixed',
-  versions: ['0.1.1-rc.2', '0.1.2-rc.1'],
+  versions: [UPSTREAM_VALIDATED_VERSION, '0.1.8-rc.1'],
 })
 
 const installedLines = installedUpstreamLines()

@@ -1,5 +1,6 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SubagentState, SubagentStatus, SubagentOutputLine, SubagentOutputKind, SubagentToolCall, SubagentTokenUsage } from '../adapter/ports/channel-view.js'
+import { toolResultPayload } from './upstream-legacy.js'
 export type { SubagentState, SubagentStatus, SubagentOutputLine, SubagentOutputKind, SubagentToolCall, SubagentTokenUsage } from '../adapter/ports/channel-view.js'
 
 
@@ -211,10 +212,8 @@ export class SubagentActivityStore {
           tool.endedAt = Date.now()
           if (data.error !== undefined) tool.error = String(data.error)
           else {
-            const block = data.message?.content?.[0]
-            tool.resultPreview = block !== undefined && block.type === 'tool-result'
-              ? this.previewOf(block.content)
-              : undefined
+            const { content } = toolResultPayload(data.message)
+            tool.resultPreview = content.length > 0 ? this.previewOf(content) : undefined
           }
           this.notify()
         }

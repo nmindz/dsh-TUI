@@ -5,6 +5,14 @@ import type { ChannelState } from '../channel/types.js'
 import { isReservedCredentialRef } from '../credentialRefGuard.js'
 import type { OAuthProviderStatus, OAuthSetupHost, ProfilePathOp, ProviderSetupHost } from '../providerWizard.js'
 import type { SettingsHost } from '../settingsEditor.js'
+import { withHostRootCapability } from '../host-access.js'
+
+// A settings write rewrites the profile patch and reloads it, which acts on
+// the composition root. These writes are the host's own, so they carry the
+// host capability through the plugin-activation guard.
+function hostWrite(write: () => Promise<void>): Promise<void> {
+  return withHostRootCapability(write)
+}
 
 export function createSettingsHosts(ctx: Context, assertActive: () => void = () => undefined): Pick<ChannelState, 'settingsHost' | 'providerSetup' | 'oauthProviderStatuses'> {
   let settingsHostResolved = false
@@ -57,7 +65,7 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
           }))
         },
         write(ns, ops, expectedRevision) {
-          return settings.mutate(ns, ops, expectedRevision)
+          return hostWrite(() => settings.mutate(ns, ops, expectedRevision))
         },
         async credentialConfigured(ref) {
           // The environment shadows the store (providerSetup.envShadows), so
@@ -101,8 +109,7 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
         | undefined
       const settings = ctx.get('settings') as
         | {
-          describe(): readonly { ns: string; revision: number; user?: unknown }[]
-          get(ns: string): unknown
+          describe(): readonly { ns: string; revision: number; value?: unknown; user?: unknown }[]
           mutate(
             ns: string,
             ops: readonly (
@@ -131,6 +138,11 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
       }
       const revision = (): number | undefined =>
         settings.describe().find(descriptor => descriptor.ns === 'llm-pi-ai')?.revision
+      // The resolved section (every layer merged): the descriptor's `value`.
+      const resolvedSection = (): { providers?: Record<string, unknown> } | undefined =>
+        settings.describe().find(descriptor => descriptor.ns === 'llm-pi-ai')?.value as
+          | { providers?: Record<string, unknown> }
+          | undefined
       // The OAuth sign-in surface (dsh-auth-style plugin), structural and
       // optional: mounting the plugin lights up the wizard's OAuth branch,
       // and without it the wizard is exactly what it was before.
@@ -157,18 +169,14 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
             .map(entry => ({ provider: entry.provider, displayName: entry.displayName }))
         },
         routeExists(route) {
-          const section = settings.get('llm-pi-ai') as
-            | { providers?: Record<string, unknown> }
-            | undefined
+          const section = resolvedSection()
           return section?.providers !== undefined && route in section.providers
         },
         listRefUsers(ref, exceptRoute) {
-          // The RESOLVED merge (settings.get), not the user layer: a base
-          // provider or composition-base route naming this ref is invisible
-          // to listConfiguredProviders() but still consumes the credential.
-          const section = settings.get('llm-pi-ai') as
-            | { providers?: Record<string, unknown> }
-            | undefined
+          // The RESOLVED merge, not the user layer: a base provider or
+          // composition-base route naming this ref is invisible to
+          // listConfiguredProviders() but still consumes the credential.
+          const section = resolvedSection()
           const providers = section?.providers
           if (providers === undefined || typeof providers !== 'object' || providers === null) return []
           return Object.entries(providers).flatMap(([route, profile]) => {
@@ -181,7 +189,7 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
         listConfiguredProviders() {
           // The editable/deletable set is the USER layer only: `describe()`'s
           // `user` is the raw user section — the same source the /settings
-          // screen treats as overrides. `settings.get()` is the resolved
+          // screen treats as overrides. The descriptor `value` is the resolved
           // merge; listing a route inherited from a composition base would
           // promise a delete that cannot land (the unset only clears the
           // user layer, so the base value re-inherits) while the credential
@@ -193,7 +201,7 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
           // user layer legitimately exposes nothing to edit.
           const section = (descriptor?.user !== undefined
             ? descriptor.user
-            : settings.get('llm-pi-ai')) as
+            : resolvedSection()) as
             | { providers?: Record<string, unknown> }
             | undefined
           const providers = section?.providers
@@ -262,7 +270,7 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
           const ops = [{ op: 'set' as const, path: ['providers', route], value: profile }]
           try {
             assertActive()
-            await settings.mutate('llm-pi-ai', ops, revision())
+            await hostWrite(() => settings.mutate('llm-pi-ai', ops, revision()))
           } catch (error) {
             // One retry on a stale-revision conflict (a concurrent write
             // landed between describe and mutate); anything else propagates
@@ -270,7 +278,7 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
             const code = (error as { code?: unknown })?.code
             if (code !== 'SETTINGS_CONFLICT') throw error
             assertActive()
-            await settings.mutate('llm-pi-ai', ops, revision())
+            await hostWrite(() => settings.mutate('llm-pi-ai', ops, revision()))
           }
         },
         async mutateProfile(route, ops) {
@@ -282,27 +290,27 @@ export function createSettingsHosts(ctx: Context, assertActive: () => void = () 
             : { op: 'unset', path: ['providers', route, ...op.path] })
           try {
             assertActive()
-            await settings.mutate('llm-pi-ai', full, revision())
+            await hostWrite(() => settings.mutate('llm-pi-ai', full, revision()))
           } catch (error) {
             // Same stale-revision retry as writeProfile.
             const code = (error as { code?: unknown })?.code
             if (code !== 'SETTINGS_CONFLICT') throw error
             assertActive()
-            await settings.mutate('llm-pi-ai', full, revision())
+            await hostWrite(() => settings.mutate('llm-pi-ai', full, revision()))
           }
         },
         async removeProfile(route) {
           const ops = [{ op: 'unset' as const, path: ['providers', route] }]
           try {
             assertActive()
-            await settings.mutate('llm-pi-ai', ops, revision())
+            await hostWrite(() => settings.mutate('llm-pi-ai', ops, revision()))
           } catch (error) {
             // Same stale-revision retry as writeProfile: the wizard reports
             // any real failure so the credential deletion can be skipped.
             const code = (error as { code?: unknown })?.code
             if (code !== 'SETTINGS_CONFLICT') throw error
             assertActive()
-            await settings.mutate('llm-pi-ai', ops, revision())
+            await hostWrite(() => settings.mutate('llm-pi-ai', ops, revision()))
           }
         },
       }

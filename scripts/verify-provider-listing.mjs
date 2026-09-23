@@ -53,7 +53,7 @@ const llmStub = {
 function makeChannel(settingsSection) {
   const settingsStub = settingsSection === undefined
     ? undefined
-    : { get: ns => (ns === 'llm-pi-ai' ? settingsSection : undefined) }
+    : { describe: () => (settingsSection === undefined ? [] : [{ ns: 'llm-pi-ai', value: settingsSection }]) }
   const ctx = {
     on: () => () => {},
     get(service) {

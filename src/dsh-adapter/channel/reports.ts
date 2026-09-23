@@ -15,6 +15,7 @@ import { getHostGrantStore } from '../host-grants.js'
 import { getHostFacade } from '../plugin-host.js'
 import { pluginsInfoLines } from '../plugins-info.js'
 import type { ChannelOwner } from './owner.js'
+import { toolResultPayload } from '../upstream-legacy.js'
 
 /** Local reports and filesystem actions, fenced to the originating binding. */
 export function createReportActions(ctx: Context, deps: {
@@ -97,11 +98,8 @@ export function createReportActions(ctx: Context, deps: {
           break
         case 'tool/call': parts.push(`${t('export-tool-section', { name: event.data.name })}\n\n\`\`\`json\n${event.data.arguments}\n\`\`\`\n`); break
         case 'tool/result': {
-          const block = event.data.message.content[0]
-          if (block?.type === 'tool-result') {
-            const text = textOf(block.content)
-            if (text) parts.push(`${t('export-result-section')}\n\n\`\`\`\n${text}\n\`\`\`\n`)
-          }
+          const text = textOf(toolResultPayload(event.data.message).content)
+          if (text) parts.push(`${t('export-result-section')}\n\n\`\`\`\n${text}\n\`\`\`\n`)
           break
         }
       }
