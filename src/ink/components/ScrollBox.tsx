@@ -147,6 +147,17 @@ function ScrollBox({
       notify();
     }, Math.max(0, FRAME_INTERVAL_MS - since));
   };
+  // Trailing notify for content-height changes: every such pass re-arms it
+  // and it fires once the series stops. Mid-series the next commit re-reads
+  // the handle anyway; only the last pass would otherwise go unobserved.
+  const contentSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const notifyContentSettled = () => {
+    if (contentSettleTimerRef.current !== null) clearTimeout(contentSettleTimerRef.current);
+    contentSettleTimerRef.current = setTimeout(() => {
+      contentSettleTimerRef.current = null;
+      notifyCoalesced();
+    }, FRAME_INTERVAL_MS * 2);
+  };
   function scrollMutated(el: DOMElement): void {
     // Signal background intervals (IDE poll, LSP poll, GCS fetch, orphan
     // check) to skip their next tick — they compete for the event loop and
@@ -340,8 +351,12 @@ function ScrollBox({
       // always runs the queued notify, and subscribers re-read the handle
       // (level-triggered), so a coalesced pass still sees the latest bounds.
       el.onViewportHeightChange = notifyCoalesced;
+      el.onContentHeightChange = notifyContentSettled;
+    } else if (contentSettleTimerRef.current !== null) {
+      clearTimeout(contentSettleTimerRef.current);
+      contentSettleTimerRef.current = null;
     }
-  // notify/notifyCoalesced only close over refs, like the imperative handle
+  // notify/notifyCoalesced/notifyContentSettled only close over refs, like the imperative handle
   // above.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
