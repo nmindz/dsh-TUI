@@ -116,6 +116,13 @@ export type DOMElement = {
   // add a React commit per frame. Width is out of scope (selection already
   // consumes the renderer's per-frame viewportResizes).
   onViewportHeightChange?: () => void
+  // Renderer → React, set by ScrollBox: the content height changed between
+  // two passes while the viewport height held. A backfill or late layout
+  // pass that grows content under a sticky pin fires no other notify, so the
+  // last pass of a series leaves geometry subscribers one pass stale. Same
+  // first-frame rule as onViewportHeightChange; ScrollBox defers it to a
+  // trailing notify so streaming does not pay a commit per frame.
+  onContentHeightChange?: () => void
   // Set by ScrollBox.scrollToElement; render-node-to-output reads
   // el.yogaNode.getComputedTop() (FRESH — same Yoga pass as scrollHeight)
   // and sets scrollTop = top + offset, then clears this. Unlike an

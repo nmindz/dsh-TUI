@@ -1207,6 +1207,12 @@ function renderNodeToOutput(
           prevViewportHeight !== innerHeight
         ) {
           node.onViewportHeightChange?.()
+        } else if (
+          prevViewportHeight !== undefined &&
+          prevScrollHeight !== scrollHeight
+        ) {
+          // See DOMElement.onContentHeightChange.
+          node.onContentHeightChange?.()
         }
         // Absolute screen-buffer row where the scrollable area (inside
         // padding) begins. Exposed via ScrollBoxHandle.getViewportTop() so
