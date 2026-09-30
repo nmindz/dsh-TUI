@@ -106,6 +106,18 @@ export class CredentialFile implements PiAiCredentialStore {
     return (await this.load()).providers[providerId]
   }
 
+  /**
+   * Whether a credential is stored for one provider, answered without
+   * yielding. Route registration decides who owns a provider id and the
+   * registry refuses a second owner, so a claim that only lands after an
+   * await has already raced whichever adapter family can serve the route.
+   * Throws like every other read; the caller decides what an unreadable
+   * file means.
+   */
+  hasStored(providerId: string): boolean {
+    return this.loadSync().providers[providerId] !== undefined
+  }
+
   /** Stored credential metadata without resolving or exposing secrets. */
   async list(): Promise<readonly PiAiCredentialInfo[]> {
     const document = await this.load()
@@ -174,6 +186,10 @@ export class CredentialFile implements PiAiCredentialStore {
   }
 
   private async load(): Promise<CredentialsDocument> {
+    return this.loadSync()
+  }
+
+  private loadSync(): CredentialsDocument {
     let text: string
     try {
       text = readFileSync(this.path, 'utf8')

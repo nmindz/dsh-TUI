@@ -3,8 +3,8 @@
  *
  * One internal Cordis module mounts supported subscription routes from the
  * installed pi-ai catalog (ChatGPT/Codex, Claude, Grok, and newer flows when
- * available) as `llm` registry routes. Signed-in models appear in model
- * pickers; unsigned routes remain addressable for saved sessions. When the
+ * available) as `llm` registry routes. A route is claimed only while its
+ * provider is signed in, so its models appear in model pickers. When the
  * Host supplies `deepseekAccount`, the same sign-in surface also delegates
  * DeepSeek browser authorization to that service; the Host owns its model
  * route, callback, and credential store.
@@ -32,9 +32,12 @@
  *     #       contextWindow: 1000000
  * ```
  *
- * Routes register individually: a route another adapter family already owns
- * (an llm-pi-ai settings profile for the same provider) is refused by the
- * registry — that refusal is logged and the remaining routes still mount.
+ * Routes register individually, and only while signed in: a provider route id
+ * belongs to whoever can serve it, so a signed-out route is left for another
+ * adapter family (an llm-pi-ai settings profile naming the same provider) to
+ * claim. Login registers the route, logout gives it back. A route the other
+ * family already owns is refused by the registry — that refusal is logged and
+ * the remaining routes still mount.
  *
  * @module @deepseek-harness-tui/dsh-tui/oauth
  */
@@ -51,7 +54,7 @@ import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { PiAiAdapterOptions } from '@deepseek-ai/dsh-llm-pi-ai'
 import { CredentialFile, defaultCredentialsFile } from './credentials.js'
 import { availableOAuthProviderIds, buildOAuthProfile, OAUTH_PROVIDER_IDS, type ModelOverride } from './profiles.js'
-import { createDshAuthApi, DshAuthService } from './service.js'
+import { createDshAuthApi, DshAuthService, type DshAuthApi } from './service.js'
 import { createAuthCommandHandler } from './command.js'
 import type { PiAiAuthContext } from './pi-ai.js'
 import { createDeepSeekCallbackOriginResolver, deepSeekAccountFrom } from './deepseek.js'
@@ -136,10 +139,10 @@ function hostAuthContext(): PiAiAuthContext {
 
 /**
  * The adapter the plugin registers: a {@link PiAiAdapter} whose *advisory
- * catalog* is credential-gated. A provider with no stored OAuth credential
- * lists no models — its rows never reach any model picker, which is the
- * whole point: picking a model that would only fail with "not signed in"
- * is noise. The gate only shapes `listModels`; `resolveModel` and requests
+ * catalog* is credential-gated. A provider whose credential disappears
+ * between registration and the next listing lists no models — picking a
+ * model that would only fail with "not signed in" is noise. The gate only
+ * shapes `listModels`; `resolveModel` and requests
  * are untouched, so a model id already saved in a session (or named
  * explicitly) keeps resolving exactly as the registry contract promises
  * ("advisory and never changes routing").
@@ -231,7 +234,24 @@ export function apply(ctx: Context, config: Config): void {
       return questions === undefined ? undefined : request => questions.ask(request)
     },
   })
-  service.api = api
+  // Sign-in state decides which routes this module owns, so every mutation of
+  // it re-syncs the registry. Assigned by the lifecycle effect below; a no-op
+  // before mount and after teardown.
+  let resyncRoutes = (): void => {}
+  const gatedApi: DshAuthApi = {
+    providers: () => api.providers(),
+    login: async (provider, signal) => {
+      const result = await api.login(provider, signal)
+      resyncRoutes()
+      return result
+    },
+    logout: async provider => {
+      const existed = await api.logout(provider)
+      resyncRoutes()
+      return existed
+    },
+  }
+  service.api = gatedApi
 
   ctx.effect(function* () {
     // LIFO disposal: release command registration, drain started logins, then
@@ -243,27 +263,51 @@ export function apply(ctx: Context, config: Config): void {
     // tree deadlocked.
     const llm = ctx.get('llm') as LlmRegistryLike | undefined
     const commands = ctx.get('commands') as CommandsLike | undefined
+    // Held registrations by route, so a sign-out can hand the id back.
+    const held = new Map<string, () => void>()
     if (llm === undefined) {
       ctx.logger.warn('dsh-auth: no llm service mounted — provider routes stay unregistered')
     } else {
       // Individual registrations: one conflicting route must not strand the
       // rest (the registry keeps the previous owner serving).
-      for (const id of configured) {
-        try {
-          releases.push(llm.registerAdapter([id], adapter))
-        } catch (error: unknown) {
-          ctx.logger.error(
-            `dsh-auth: route "${id}" was not registered: ${error instanceof Error ? error.message : String(error)} `
-            + '(another adapter family may own it — check the llm-pi-ai settings section)',
-          )
+      resyncRoutes = () => {
+        for (const id of configured) {
+          const registered = held.get(id)
+          let wanted: boolean
+          try {
+            wanted = store.hasStored(id)
+          } catch (error: unknown) {
+            // Fail closed like the listing gate: an unreadable credential
+            // file cannot justify claiming a route whose requests would fail.
+            ctx.logger.warn(
+              `dsh-auth: route "${id}" left unregistered — the credential file is unreadable: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            )
+            wanted = false
+          }
+          if (wanted === (registered !== undefined)) continue
+          if (registered !== undefined) {
+            registered()
+            held.delete(id)
+            continue
+          }
+          try {
+            held.set(id, llm.registerAdapter([id], adapter))
+          } catch (error: unknown) {
+            ctx.logger.error(
+              `dsh-auth: route "${id}" was not registered: ${error instanceof Error ? error.message : String(error)} `
+              + '(another adapter family may own it — check the llm-pi-ai settings section)',
+            )
+          }
         }
       }
+      resyncRoutes()
     }
     const active = new Set<Promise<unknown>>()
     if (commands === undefined) {
       ctx.logger.warn('dsh-auth: no commands service mounted — the /auth command stays unregistered')
     } else {
-      const handler = createAuthCommandHandler(api)
+      const handler = createAuthCommandHandler(gatedApi)
       releases.push(commands.register({
         name: 'auth',
         description: 'Provider account sign-in (OAuth): status, login, logout',
@@ -279,6 +323,9 @@ export function apply(ctx: Context, config: Config): void {
     // enter while already-started logins finish their final write.
     yield async () => { await Promise.allSettled([...active]) }
     yield () => {
+      resyncRoutes = () => {}
+      for (const release of held.values()) release()
+      held.clear()
       for (const release of releases) release()
     }
   }, 'dsh-auth lifecycle')

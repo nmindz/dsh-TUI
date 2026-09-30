@@ -14,15 +14,16 @@
  * callback origin, browser panel, cancellation including logout during
  * pending callback resolution, masked command results,
  * profile-only update fallback listener and cleanup),
- * plus the public ./oauth entry's
- * route/command/service mount and lifecycle cleanup.
+ * credential-gated route claims (signed-out routes stay free, login claims,
+ * logout releases, an unreadable file fails closed), plus the public ./oauth
+ * entry's route/command/service mount and lifecycle cleanup.
  *
  * Run after build: `pnpm verify:oauth`.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { settled } from './lib/term-test.mjs'
 
 process.env.DSH_TUI_LANG = 'en'
@@ -47,6 +48,44 @@ const { Context } = await import('@deepseek-ai/cordis')
 const { QuestionStore } = await import('../lib/types/dsh-adapter/questions.js')
 const { createDeepSeekCallbackOriginResolver } = await import('../lib/types/dsh-adapter/oauth/deepseek.js')
 const { setLang } = await import('../lib/types/i18n.js')
+
+/** A credential file already holding OAuth entries for `providers`. */
+function writeCredentials(file, providers) {
+  mkdirSync(dirname(file), { recursive: true })
+  const entries = Object.fromEntries(providers.map(id => [id, {
+    type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 3_600_000,
+  }]))
+  writeFileSync(file, JSON.stringify({ version: 1, providers: entries }))
+}
+
+/**
+ * Mount the module over a fabricated Cordis surface with a first-come
+ * registry, to observe which provider routes it claims.
+ */
+function mountRoutes(credentialsFile, providers) {
+  const owned = new Map()
+  const logs = []
+  const service = { api: undefined, coupons: new WhaleCouponStore() }
+  const registry = {
+    registerAdapter(ids, adapter) {
+      for (const id of ids) {
+        if (owned.has(id)) throw new Error(`an adapter for provider "${id}" is already registered`)
+      }
+      for (const id of ids) owned.set(id, adapter)
+      return () => { for (const id of ids) owned.delete(id) }
+    },
+  }
+  const ctx = {
+    get: key => (key === 'dshAuth' ? service : key === 'llm' ? registry : undefined),
+    logger: { warn: message => logs.push(String(message)), error: message => logs.push(String(message)) },
+    effect(run) {
+      for (const _disposer of run()) { /* teardown is not exercised here */ }
+      return () => {}
+    },
+  }
+  oauthModule.apply(ctx, { providers, credentialsFile })
+  return { routes: () => [...owned.keys()].sort(), api: () => service.api, logs, registry }
+}
 
 /** Adapter options over one profile — enough for listModels/resolveModel offline. */
 function gateAdapterOptions() {
@@ -895,6 +934,27 @@ try {
   ok(otherCoupons.getSnapshot() === null, 'a failed bonus read does not fabricate a coupon')
   stopOtherCoupons()
 
+  // ── credential-gated route registration ──────────────────────────────────
+  console.log('route registration')
+  const signedOut = mountRoutes(join(root, 'routes-out', 'credentials.json'), ['openai-codex', 'anthropic'])
+  ok(signedOut.routes().length === 0, 'a signed-out module claims no provider route')
+  ok(signedOut.registry.registerAdapter(['anthropic'], {}) !== undefined,
+    'the route it left alone is free for another adapter family')
+
+  const signedInFile = join(root, 'routes-in', 'credentials.json')
+  writeCredentials(signedInFile, ['anthropic'])
+  const signedIn = mountRoutes(signedInFile, ['openai-codex', 'anthropic'])
+  ok(signedIn.routes().length === 1 && signedIn.routes()[0] === 'anthropic', 'only the signed-in route is claimed')
+  await signedIn.api().logout('anthropic')
+  ok(signedIn.routes().length === 0, 'logout hands the route back')
+
+  const corruptFile = join(root, 'routes-bad', 'credentials.json')
+  mkdirSync(dirname(corruptFile), { recursive: true })
+  writeFileSync(corruptFile, 'not json')
+  const corrupt = mountRoutes(corruptFile, ['anthropic'])
+  ok(corrupt.routes().length === 0 && corrupt.logs.some(line => line.includes('credential file is unreadable')),
+    'an unreadable credential file leaves the route unclaimed and says so')
+
   // ── public Cordis entry ──────────────────────────────────────────────────
   console.log('Cordis mount')
   const ctx = new Context()
@@ -923,8 +983,8 @@ try {
     })
     ok(oauthModule.name === 'dsh-auth' && typeof oauthModule.apply === 'function',
       'the public ./oauth entry exposes the compatible Cordis plugin contract')
-    ok(registeredRoutes.length === 1 && registeredRoutes[0].ids[0] === 'openai-codex',
-      'the internal entry registers the configured llm route')
+    ok(registeredRoutes.length === 0,
+      'the internal entry leaves a signed-out configured route unclaimed')
     ok(registeredCommands.length === 1 && registeredCommands[0].name === 'auth',
       'the internal entry registers /auth')
     const service = ctx.get('dshAuth')
@@ -948,15 +1008,18 @@ try {
     ok(ctx.get('webServer') === sharedWebServer,
       'DeepSeek sign-in reuses an existing Web callback listener')
     await fiber.dispose()
-    ok(released.length === 2 && released.includes('llm') && released.includes('commands'),
-      'Cordis teardown unregisters both the route and /auth')
+    ok(released.length === 1 && released.includes('commands'),
+      'Cordis teardown unregisters /auth')
     const previousRoutes = registeredRoutes.length
-    const defaultFiber = await ctx.plugin(oauthModule, {
-      credentialsFile: join(root, 'mount-default', 'credentials.json'),
-    })
+    const defaultFile = join(root, 'mount-default', 'credentials.json')
+    writeCredentials(defaultFile, [...OAUTH_PROVIDER_IDS])
+    const defaultFiber = await ctx.plugin(oauthModule, { credentialsFile: defaultFile })
     ok(JSON.stringify(registeredRoutes.slice(previousRoutes).map(route => route.ids[0])) === JSON.stringify(available),
       'omitted providers config mounts exactly the installed pi-ai OAuth flows')
+    const releasedBefore = released.length
     await defaultFiber.dispose()
+    ok(released.slice(releasedBefore).filter(entry => entry === 'llm').length === available.length,
+      'Cordis teardown releases every claimed route')
   } finally {
     await ctx.fiber.dispose()
   }

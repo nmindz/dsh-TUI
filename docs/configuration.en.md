@@ -304,7 +304,7 @@ for the complete field reference.
 | `DSH_TUI_RESUME_SESSION` | Resume a session at startup, normally set by a launcher |
 | `DSH_TUI_WORKSPACE_TARGET` | Workspace path or URI resolved at startup, normally set by `dsh-tui <target>` |
 | `DSH_TUI_SESSION_ROOT` | Override the JSONL session root; profile default `$DSH_HOME/sessions`, bare `cordis.yml` default `~/.dsh-tui/sessions` |
-| `DSH_TUI_OAUTH_PROVIDERS` | Comma-separated override of the llm routes dsh-auth claims (default `openai-codex,anthropic,xai`). The registry is first-come → drop a route here for a same-named route configured under `llm-pi-ai:` to serve |
+| `DSH_TUI_OAUTH_PROVIDERS` | Comma-separated subset of the OAuth routes dsh-auth mounts (unset: every flow the installed pi-ai ships). A mounted route is claimed only while signed in → drop a signed-in route here for a same-named route configured under `llm-pi-ai:` to serve |
 | `DSH_PERMISSION_MODE` | Override non-Windows sandbox policy, such as `workspace-write` or `danger-full-access` |
 | `DSH_TUI_WORKSPACE` | Working directory used by the Windows `dsh-tui.cmd` launcher |
 | `DSH_TUI_DEBUG` | Enable dsh-tui diagnostics on stderr |
@@ -350,7 +350,7 @@ providers without a restart.
   headers also explain the limitation and stay on the snapshot, rather than
   saving endpoint-only models into an unverifiable profile.
 
-**Route claims and collisions**: dsh-auth claims the `openai-codex`, `anthropic` and `xai` llm routes by default, signed in or not. The llm registry is first-come and both adapter families register asynchronously, so a same-named route configured under `llm-pi-ai:` in settings.yaml can lose the claim — the loser only reports it in the harness log. A dsh-auth route that is not signed in lists an empty catalog, so `/model` shows that provider as unavailable rather than hiding it. To let the `llm-pi-ai` route serve, drop the conflicting route with `DSH_TUI_OAUTH_PROVIDERS` (e.g. `DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`); dsh-auth refuses an empty list, so disable the whole row (`disabled: true`) in the profile patch when no subscription sign-in is wanted.
+**Route claims and collisions**: dsh-auth claims an OAuth llm route only while that provider is signed in — `/auth login` claims it, `/auth logout` hands it back. A signed-out route is left free, so a same-named route configured under `llm-pi-ai:` in settings.yaml serves it. The llm registry is first-come, so while you are signed in the dsh-auth route wins, and the losing side only reports it in the harness log. To let the `llm-pi-ai` route serve a provider you are signed in to, drop it with `DSH_TUI_OAUTH_PROVIDERS` (e.g. `DSH_TUI_OAUTH_PROVIDERS=openai-codex,xai`). dsh-auth refuses an empty list, so disable the whole row (`disabled: true`) in the profile patch when no subscription sign-in is wanted.
 
 Where it writes:
 
