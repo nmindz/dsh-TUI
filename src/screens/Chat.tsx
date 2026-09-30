@@ -1903,6 +1903,13 @@ export function Chat({
     })()
   }
 
+  // Both catalog halves resolve together, and a synchronous throw from either
+  // becomes a rejection instead of escaping the command with the picker open.
+  const loadModelCatalog = () => Promise.all([
+    Promise.resolve().then(() => channel.listModels()),
+    Promise.resolve().then(() => channel.listProviders()).catch(() => []),
+  ])
+
   const runCommand = (
     name: string,
     rawInput = '',
@@ -2267,7 +2274,7 @@ export function Chat({
         // Both halves land together: the group rows come from the registry
         // listing, so a landing computed against a stale provider list could
         // focus a row the fresh catalog renders elsewhere.
-        void Promise.all([channel.listModels(), channel.listProviders().catch(() => [])])
+        void loadModelCatalog()
           .then(([list, infos]) => {
             setModels(list)
             setProviderInfos(infos)
@@ -2276,6 +2283,10 @@ export function Chat({
             setModelGroup(landing.group)
             setModelPickerDirect(landing.group !== undefined)
             dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
+          })
+          .catch((error: unknown) => {
+            dispatchOverlay({ type: 'close-if', kind: 'model' })
+            channel.notify(t('model-load-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error', timeoutMs: 8000 })
           })
         return true
       }
@@ -2342,12 +2353,14 @@ export function Chat({
           if (outcome === 'added' || outcome === 'updated'
             || outcome === 'deleted' || outcome === 'signed-out') {
             channel.invalidateModelCompletion()
-            void Promise.all([channel.listModels(), channel.listProviders().catch(() => [])])
+            void loadModelCatalog()
               .then(([list, infos]) => {
                 setModels(list)
                 setProviderInfos(infos)
                 setModelCatalogLoaded(true)
               })
+              // A failed refresh keeps the previous catalog; the next open refetches.
+              .catch(() => undefined)
           }
         }).catch(() => {
           // The wizard notifies on every handled failure; this only swallows

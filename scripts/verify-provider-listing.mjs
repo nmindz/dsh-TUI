@@ -16,7 +16,12 @@
  *   3. the resolved section is what counts, so a route inherited from a
  *      composition base still lists;
  *   4. with no settings service at all the full registry is the fallback,
- *      rather than a blank picker.
+ *      rather than a blank picker;
+ *   5. current hosts expose the section through `describe()`, not `get(ns)`,
+ *      and listing must read it there. A settings surface this version does
+ *      not recognize, or one that throws, falls back like (4). listProviders
+ *      is called synchronously by `/model`, so it must never throw: a throw
+ *      left the picker on "Loading models" with every key dead.
  *
  * Run with plain node against the compiled lib (after `pnpm build`):
  * `node scripts/verify-provider-listing.mjs`
@@ -50,10 +55,17 @@ const llmStub = {
   },
 }
 
-function makeChannel(settingsSection) {
-  const settingsStub = settingsSection === undefined
-    ? undefined
-    : { get: ns => (ns === 'llm-pi-ai' ? settingsSection : undefined) }
+/** Settings service shapes: `get(ns)` (older hosts), `describe()` (current). */
+function settingsStubFor(settingsSection, shape) {
+  if (settingsSection === undefined) return undefined
+  if (shape === 'get') return { get: ns => (ns === 'llm-pi-ai' ? settingsSection : undefined) }
+  if (shape === 'describe') return { describe: () => [{ ns: 'other', value: {} }, { ns: 'llm-pi-ai', value: settingsSection }] }
+  if (shape === 'throwing') return { describe: () => { throw new Error('settings unavailable') } }
+  return { mutate: async () => {} }
+}
+
+function makeChannel(settingsSection, shape = 'get') {
+  const settingsStub = settingsStubFor(settingsSection, shape)
   const ctx = {
     on: () => () => {},
     get(service) {
@@ -138,6 +150,28 @@ const rowIds = async (channel, models = []) => {
   const channel = makeChannel(undefined)
   const rows = await rowIds(channel)
   check('no settings service falls back to the full registry',
+    rows.length === REGISTRY.length, JSON.stringify(rows))
+}
+
+// 5. Current hosts: the section lives in describe(). Same contract as (1).
+{
+  const channel = makeChannel({ providers: { anthropic: { apiKeyEnv: 'ANTHROPIC_API_KEY' } } }, 'describe')
+  let threw
+  try { channel.listProviders() } catch (error) { threw = error }
+  check('listProviders does not throw on a describe()-only settings service', threw === undefined, String(threw))
+  const rows = await rowIds(channel)
+  check('describe() settings: only the configured route becomes a picker row',
+    rows.length === 1 && rows[0] === 'anthropic', JSON.stringify(rows))
+}
+
+// 5b. Unrecognized or failing settings surfaces fall back like (4), never throw.
+for (const shape of ['opaque', 'throwing']) {
+  const channel = makeChannel({ providers: { anthropic: {} } }, shape)
+  let threw
+  try { channel.listProviders() } catch (error) { threw = error }
+  check(`listProviders does not throw on a ${shape} settings service`, threw === undefined, String(threw))
+  const rows = await rowIds(channel)
+  check(`${shape} settings service falls back to the full registry`,
     rows.length === REGISTRY.length, JSON.stringify(rows))
 }
 

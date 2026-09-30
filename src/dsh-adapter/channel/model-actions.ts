@@ -4,6 +4,7 @@ import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandCompletionNode } from '../../commands.js'
 import { nearestLowerEffort, readEffortPref, resolveEffortDefault, writeEffortPref } from '../../effortPrefs.js'
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
+import { settingsValue } from '../compat/settings.js'
 import { getLang, t, tOr, type Lang } from '../../i18n.js'
 import { migratePresetPref, writePresetPref } from '../../presetPrefs.js'
 import { presetDisplayId, resolveCompatiblePreset, rosterOf, type AgentPresetInfo } from '../preset-resolution.js'
@@ -13,6 +14,25 @@ import type { ChannelState, EffortOption, PresetOption } from './types.js'
 import type { ModelProviderInfo } from '../types.js'
 
 type Binding = ReturnType<typeof createChannelBinding>
+
+/**
+ * The route ids configured in the resolved `llm-pi-ai` section, or undefined
+ * when the host cannot say (no settings service, no section, or a settings
+ * surface this version does not recognize). Never throws: the picker calls
+ * this synchronously, and a throw there leaves `/model` loading forever.
+ */
+function configuredPiAiRoutes(ctx: Context): Record<string, unknown> | undefined {
+  const settings = ctx.get('settings') as Parameters<typeof settingsValue>[0] | undefined
+  if (settings === undefined || (typeof settings.get !== 'function' && typeof settings.describe !== 'function')) return undefined
+  let section: unknown
+  try {
+    section = settingsValue(settings, 'llm-pi-ai')
+  } catch {
+    return undefined
+  }
+  const providers = (section as { providers?: unknown } | undefined)?.providers
+  return providers !== null && typeof providers === 'object' ? providers as Record<string, unknown> : undefined
+}
 
 /**
  * Route metadata, effort preference and preset/model catalog actions.
@@ -255,10 +275,7 @@ export function createModelActions(
     // The RESOLVED section, not the user layer: a route inherited from a
     // composition base is configured and usable even though `/provider`
     // cannot edit it.
-    const section = (ctx.get('settings') as { get(ns: string): unknown } | undefined)
-      ?.get('llm-pi-ai') as { providers?: Record<string, unknown> } | undefined
-    const configured = section?.providers
-    const known = configured !== null && typeof configured === 'object' ? configured : undefined
+    const known = configuredPiAiRoutes(ctx)
     return Promise.resolve(llmRuntime.listProviders().map(info => ({
       ...info,
       // No settings service (or no section): treat every route as configured
