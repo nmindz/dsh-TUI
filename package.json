@@ -73,6 +73,10 @@
       "types": "./lib/types/scenes.d.ts",
       "import": "./lib/types/scenes.js"
     },
+    "./session-controller": {
+      "types": "./lib/types/session-controller.d.ts",
+      "import": "./lib/types/session-controller.js"
+    },
     "./extensions": {
       "types": "./lib/types/extensions.d.ts",
       "import": "./lib/types/extensions.js"

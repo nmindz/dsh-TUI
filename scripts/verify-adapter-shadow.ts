@@ -130,6 +130,9 @@ const METHOD_POLICY: Record<string, Record<string, MethodPolicy>> = {
     active: { kind: 'capability', capability: 'host.scenes.active' },
     subscribe: { kind: 'capability', capability: 'host.scenes.subscribe' },
   },
+  TuiSessionController: {
+    resolveAgent: { kind: 'exempt', reason: 'harness-plane lookup injected by schedule, not a plugin capability; returns only agents already live in this process' },
+  },
   TuiSettingsSectionsRuntime: {
     register: { kind: 'capability', capability: 'host.settings.register' },
     list: { kind: 'capability', capability: 'host.settings.list' },

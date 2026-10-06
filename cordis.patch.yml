@@ -333,6 +333,12 @@
     - id: dsh-tui-scenes
       name: '@deepseek-harness-tui/dsh-tui/scenes'
 
+    # schedule injects `sessionController`; the only official provider needs
+    # webRuntime. Resolves live agents only — rationale in the module docs.
+    - id: dsh-tui-session-controller
+      name: '@deepseek-harness-tui/dsh-tui/session-controller'
+      disabled: !!js "[...ctx.loader.entries()].some(entry => entry.options.id === 'session-controller' && entry.options.name === '@deepseek-ai/dsh-api-session-controller' && !entry.disabled)"
+
     # Plugin-interop anchor (Community Consensus v0.15): the unified grant
     # store, runtime generation id, and Host Descriptor live here; later
     # contract surfaces (plugin storage, message observation, effect
