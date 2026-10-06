@@ -9,7 +9,10 @@
  *      `@deepseek-ai/*` package (an optional install would still land a real
  *      copy in the profile whenever pnpm can resolve it);
  *   2. every `@deepseek-ai/*` peerDependency is also a devDependency (local
- *      type-check), at the exact same range;
+ *      type-check). The two ranges deliberately differ: the peer range is the
+ *      host-admission policy and is permissive, the dev range pins the line
+ *      this repo builds and resolves against. Every `dsh-*` peer must carry
+ *      the SAME permissive range, so one package cannot quietly narrow it;
  *   3. every `@deepseek-ai/*` peerDependency is optional, so npm consumers do
  *      not auto-install a second framework tree beside the dsh host;
  *   4. the `@deepseek-ai/*` peer set equals UPSTREAM_BLESSED_PACKAGES, so an
@@ -34,14 +37,22 @@ for (const section of ['dependencies', 'optionalDependencies'] as const) {
   }
 }
 
+/** Host-admission policy for the harness line. dsh checks peer ranges with
+ *  `includePrerelease`, so one open comparator admits every prerelease line —
+ *  including ones published after this build. Drift is reported at boot and by
+ *  `verify:contract`, not by refusing to load. */
+const HARNESS_PEER_RANGE = '>=0.1.0-rc.6'
+const HARNESS = /^@deepseek-ai\/dsh-/
+
 const peers: string[] = Object.keys(manifest.peerDependencies ?? {}).filter((name) => FRAMEWORK.test(name))
 for (const name of peers) {
   const peerRange = manifest.peerDependencies[name]
   const devRange = manifest.devDependencies?.[name]
   if (devRange === undefined) {
     failures.push(`${name} is a peerDependency without a matching devDependency (local type-check would break)`)
-  } else if (devRange !== peerRange) {
-    failures.push(`${name} range mismatch: peer=${peerRange} vs dev=${devRange}`)
+  }
+  if (HARNESS.test(name) && peerRange !== HARNESS_PEER_RANGE) {
+    failures.push(`${name} peer range is "${peerRange}", not the shared "${HARNESS_PEER_RANGE}" — a narrowed peer refuses hosts the rest of the manifest admits`)
   }
   if (manifest.peerDependenciesMeta?.[name]?.optional !== true) {
     failures.push(`${name} is a host-provided peer but is not marked optional (npm would auto-install a second framework tree)`)
@@ -61,4 +72,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`  - ${failure}`)
   process.exit(1)
 }
-console.log(`manifest deps OK (${peers.length} optional framework peers, all mirrored in dev at matching ranges, blessed list in sync)`)
+console.log(`manifest deps OK (${peers.length} optional framework peers, all mirrored in dev, dsh-* peers at "${HARNESS_PEER_RANGE}", blessed list in sync)`)

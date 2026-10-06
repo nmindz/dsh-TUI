@@ -28,7 +28,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 /** Primary validated upstream line (newest). */
-export const UPSTREAM_VALIDATED_VERSION = '0.2.0-rc.2'
+export const UPSTREAM_VALIDATED_VERSION = '0.2.1-alpha.1'
 
 /**
  * Explicitly supported upstream prerelease lines, oldest first.
@@ -65,6 +65,7 @@ export const UPSTREAM_VALIDATED_VERSIONS = [
   '0.1.7-rc.2',
   '0.2.0-rc.1',
   '0.2.0-rc.2',
+  '0.2.1-alpha.1',
 ] as const
 
 /**
@@ -230,10 +231,20 @@ export function installedMeetsVersion(packageName: string, minimum: string): boo
 }
 
 /**
+ * Harness packages that do not publish on every line, so their version is
+ * pinned behind the primary and must not read as a mixed tree. The runtime
+ * does not ship `dsh-invariants` at all — it is a type-only dev dependency
+ * here — and its newest release is 0.2.0-rc.2.
+ */
+const UPSTREAM_OFF_LINE_PACKAGES: ReadonlySet<string> = new Set([
+  '@deepseek-ai/dsh-invariants',
+])
+
+/**
  * The distinct installed prerelease versions across the blessed harness
- * packages (framework packages excluded). One entry = coherent install;
- * several = a mixed tree, which the per-package drift check cannot see.
- * Empty when nothing (or no harness package) is installed.
+ * packages (framework packages and off-line packages excluded). One entry =
+ * coherent install; several = a mixed tree, which the per-package drift check
+ * cannot see. Empty when nothing (or no harness package) is installed.
  */
 export function installedUpstreamLines(
   installedVersions: Readonly<Record<string, string | undefined>> = installedUpstreamVersions(),
@@ -241,6 +252,7 @@ export function installedUpstreamLines(
   const lines = new Set<string>()
   for (const packageName of UPSTREAM_BLESSED_PACKAGES) {
     if (UPSTREAM_FRAMEWORK_MAJORS[packageName] !== undefined) continue
+    if (UPSTREAM_OFF_LINE_PACKAGES.has(packageName)) continue
     const version = installedVersions[packageName]
     if (version !== undefined && parseUpstreamVersion(version) !== undefined) lines.add(version)
   }
