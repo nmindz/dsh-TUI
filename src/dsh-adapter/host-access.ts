@@ -29,6 +29,8 @@ const activationTokens = new WeakMap<object, ActivationToken>()
 const activationStorage = new AsyncLocalStorage<ActivationToken>()
 const hostCapabilityStorage = new AsyncLocalStorage<boolean>()
 const guardedRootFibers = new WeakSet<object>()
+const adoptedRootEffects = new WeakMap<object, Set<(...args: unknown[]) => unknown>>()
+const unloadHookedFibers = new WeakSet<object>()
 const guardedRootRegistries = new WeakSet<object>()
 const guardedRootEvents = new WeakSet<object>()
 const guardedRootReflects = new WeakSet<object>()
@@ -304,6 +306,124 @@ function rejectRootCapability(root: Context, capability: string): void {
   }
 }
 
+/**
+ * The activating plugin fiber a `root.effect` call should be charged to, or
+ * undefined when the call is not a plugin activation (a host call, which stays
+ * unguarded) or cannot be attributed to a fiber of THIS root (which stays
+ * rejected — attribution is what makes admitting the capability safe).
+ */
+function rootEffectOwner(root: Context): object | undefined {
+  if (!currentActivationIsPlugin(root)) return undefined
+  const token = activationStorage.getStore()
+  if (token === undefined || token.root !== root) return undefined
+  return token.fiber
+}
+
+/**
+ * Admit `root.effect` from a plugin activation as an effect OWNED by the
+ * activating fiber.
+ *
+ * Some official plugins register through the root on purpose: agent-team's
+ * session projection must outlive the plugin's own effect teardown until
+ * `disposeRuntime()` has finished (upstream `3759ea5dfe`), which is exactly
+ * what a root-scoped effect buys them. Rejecting it only breaks the plugin;
+ * the capability it actually needs is "an effect that is not torn down with
+ * my own effects", not "an effect nobody can reclaim".
+ *
+ * So the disposer is handed back unchanged — the plugin still owns it and the
+ * ordering it relies on is untouched — and it is additionally recorded against
+ * the activating fiber. {@link sweepAdoptedRootEffects} reclaims whatever is
+ * still pending once that fiber has fully unloaded, so a plugin that forgets
+ * (or throws before) disposing cannot strand an effect on the composition root.
+ *
+ * The other root capabilities stay rejected: they mutate the composition
+ * itself rather than attaching reclaimable state to it.
+ */
+function adoptRootEffectMethod(rootFiber: object, root: Context): void {
+  const descriptor = Reflect.getOwnPropertyDescriptor(rootFiber, 'effect')
+  if (descriptor?.configurable === false) return
+  const original = Reflect.get(rootFiber, 'effect')
+  if (typeof original !== 'function') return
+  Object.defineProperty(rootFiber, 'effect', {
+    configurable: false,
+    writable: false,
+    value: function (this: unknown, ...args: unknown[]) {
+      const owner = rootEffectOwner(root)
+      if (owner === undefined) {
+        // Host call → no-op. Plugin call we cannot attribute → still rejected.
+        rejectRootCapability(root, 'root.effect')
+        return Reflect.apply(original, this, args)
+      }
+      return adoptRootEffect(owner, Reflect.apply(original, this, args))
+    },
+  })
+}
+
+function adoptRootEffect(owner: object, disposer: unknown): unknown {
+  if (typeof disposer !== 'function') return disposer
+  let pending = adoptedRootEffects.get(owner)
+  if (pending === undefined) {
+    pending = new Set()
+    adoptedRootEffects.set(owner, pending)
+  }
+  const release = disposer as (...args: unknown[]) => unknown
+  const owned = function (this: unknown, ...args: unknown[]): unknown {
+    pending.delete(owned)
+    return Reflect.apply(release, this, args)
+  }
+  pending.add(owned)
+  hookOwnerUnload(owner)
+  return owned
+}
+
+/**
+ * Reclaim after the owner's teardown, not alongside it. A sibling effect would
+ * be disposed LIFO against the plugin's own effects and could pull the root
+ * effect out from under an async disposer that is still using it; `_unload`
+ * has already awaited every one of the fiber's disposables by the time this
+ * runs. A restart unloads too, which is correct: the re-activation registers
+ * its own root effects.
+ */
+function hookOwnerUnload(owner: object): void {
+  if (unloadHookedFibers.has(owner)) return
+  const original = (owner as { _unload?: unknown })._unload
+  if (typeof original !== 'function') return
+  unloadHookedFibers.add(owner)
+  Object.defineProperty(owner, '_unload', {
+    configurable: true,
+    writable: true,
+    value: function (this: unknown, ...args: unknown[]): unknown {
+      let result: unknown
+      try {
+        result = Reflect.apply(original as (...a: unknown[]) => unknown, this, args)
+      } catch (error) {
+        sweepAdoptedRootEffects(owner)
+        throw error
+      }
+      if (result !== null && typeof result === 'object' && 'then' in (result as object)) {
+        return Promise.resolve(result).finally(() => sweepAdoptedRootEffects(owner))
+      }
+      sweepAdoptedRootEffects(owner)
+      return result
+    },
+  })
+}
+
+function sweepAdoptedRootEffects(owner: object): void {
+  const pending = adoptedRootEffects.get(owner)
+  if (pending === undefined || pending.size === 0) return
+  // Reverse: later registrations may depend on earlier ones, matching the
+  // LIFO order Cordis itself disposes effects in.
+  for (const owned of [...pending].reverse()) {
+    pending.delete(owned)
+    try {
+      void owned()
+    } catch {
+      // A leaked effect's failure must not break the fiber's teardown.
+    }
+  }
+}
+
 function callContextOf(receiver: unknown): Context | undefined {
   try {
     const context = (receiver as { ctx?: unknown }).ctx
@@ -317,7 +437,7 @@ function guardRootCapabilities(root: Context): void {
   const rootFiber = rootFibers.get(root as object)
   if (rootFiber !== undefined && !guardedRootFibers.has(rootFiber)) {
     guardedRootFibers.add(rootFiber)
-    guardFiberMethod(rootFiber, 'effect', root, 'root.effect')
+    adoptRootEffectMethod(rootFiber, root)
     guardFiberMethod(rootFiber, 'restart', root, 'root.fiber.restart')
     guardFiberMethod(rootFiber, 'dispose', root, 'root.fiber.dispose')
     guardFiberMethod(rootFiber, 'update', root, 'root.fiber.update')
